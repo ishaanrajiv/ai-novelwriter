@@ -1,0 +1,29 @@
+{
+  "name": "ai-novelwriter",
+  "version": "0.1.0",
+  "description": "CLI-first AI novel writer with resumable pipeline",
+  "type": "module",
+  "bin": {
+    "ai-novelwriter": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --target=node --outfile dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@openrouter/ai-sdk-provider": "^2.2.3",
+    "ai": "^6.0.116",
+    "commander": "^13.1.0",
+    "js-yaml": "^4.1.0",
+    "jszip": "^3.10.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.13.10",
+    "bun-types": "^1.3.10",
+    "typescript": "^5.8.2"
+  }
+}

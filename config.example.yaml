@@ -1,0 +1,31 @@
+userInput:
+  bookTitle: "The Last Ember"
+  author: "Ishaan Rajiv"
+  language: "en"
+  premise: "In a drowned megacity, a memory smuggler discovers their own past was fabricated."
+  chapterCount: 10
+  targetWordCount: 70000
+  systemPromptTemplate:
+    tone: "Atmospheric, tense, emotionally grounded"
+    pov: "Third-person limited"
+    tense: "Past"
+    style: "Cinematic prose with clear scene momentum"
+    constraints: "Maintain continuity, avoid repetition, preserve character voice"
+    custom: "Use vivid sensory details and meaningful dialogue"
+  modelConfig:
+    defaultModel: "openai/gpt-4.1-mini"
+    outlineModel: "openai/gpt-4.1-mini"
+    blocksModel: "anthropic/claude-3.7-sonnet"
+    chapterModel: "anthropic/claude-3.7-sonnet"
+    memoryModel: "openai/gpt-4.1-mini"
+  blockPolicy:
+    minBlocksPerChapter: 3
+    maxBlocksPerChapter: 7
+  retryPolicy:
+    maxRetries: 3
+    baseDelayMs: 750
+    maxDelayMs: 8000
+    jitterRatio: 0.15
+runtime:
+  artifactsRoot: ".artifacts/novels"
+  tailWindowWords: 1200
