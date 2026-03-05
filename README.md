@@ -41,7 +41,7 @@ From project root (fastest local workflow):
 ```bash
 ./ai-novelwriter --help
 ./ai-novelwriter new
-./ai-novelwriter new --args
+./ai-novelwriter new --advanced
 ./ai-novelwriter run --config ./config.example.yaml
 ```
 
@@ -66,7 +66,7 @@ bun test
 
 ```bash
 ai-novelwriter new
-ai-novelwriter new --args
+ai-novelwriter new --advanced
 ai-novelwriter run --config ./config.example.yaml
 ai-novelwriter resume
 ai-novelwriter resume --project-id <projectId>
@@ -84,7 +84,7 @@ Global options:
 - `--model <openrouter-model-id>` overrides all stage models for the run
 
 `new` command option:
-- `--args` asks advanced wizard arguments (model overrides, prompt template fields, block policy, retry policy). Without this flag, only core prompts are asked and advanced values use defaults.
+- `--advanced` asks advanced wizard arguments (model overrides, prompt template fields, block policy, retry policy). Without this flag, only core prompts are asked and advanced values use defaults.
 
 ## Artifact Layout
 

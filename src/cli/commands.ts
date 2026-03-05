@@ -37,11 +37,11 @@ export function buildCli(): Command {
   program
     .command("new")
     .description("Start interactive wizard, save config, and run a new novel project")
-    .option("--args", "Ask advanced wizard arguments")
-    .action(async (options: { args?: boolean }) => {
+    .option("--advanced", "Ask advanced wizard arguments")
+    .action(async (options: { advanced?: boolean }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
-      const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.args) });
+      const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.advanced) });
       const progressReporter = createCliProgressReporter();
       const result = await createAndRunProject({
         config,
