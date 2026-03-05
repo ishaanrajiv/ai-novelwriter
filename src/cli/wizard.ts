@@ -13,11 +13,16 @@ async function ask(rl: ReturnType<typeof createInterface>, label: string, fallba
   return answer.trim() || fallback;
 }
 
+async function askOptional(rl: ReturnType<typeof createInterface>, label: string, hint: string): Promise<string> {
+  const answer = await rl.question(`${label} [${hint}]: `);
+  return answer.trim();
+}
+
 export async function runInteractiveWizard(artifactsRoot: string): Promise<AppConfig> {
   const rl = createInterface({ input, output });
 
   try {
-    const bookTitle = await ask(rl, "Book title", "Untitled Novel");
+    const bookTitle = await askOptional(rl, "Book title", "Leave Blank for Auto Generate");
     const author = await ask(rl, "Author", "Anonymous");
     const language = await ask(rl, "Language", "en");
     const premise = await ask(rl, "Premise", "A character faces escalating conflict and transforms.");

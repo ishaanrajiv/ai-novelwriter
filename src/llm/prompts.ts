@@ -23,13 +23,17 @@ export function buildSystemPrompt(template: SystemPromptTemplate): string {
 }
 
 export function buildOutlinePrompt(input: UserInput): string {
+  const requestedTitle = input.bookTitle.trim();
+
   return [
-    `Book title: ${input.bookTitle}`,
+    requestedTitle
+      ? `Requested book title (must use exactly): ${requestedTitle}`
+      : "Requested book title: (none provided; generate a fitting original title)",
     `Premise: ${input.premise}`,
     `Language: ${input.language}`,
     `Chapter count: ${input.chapterCount}`,
     `Target word count guideline: ${input.targetWordCount}`,
-    "Return a chapter-by-chapter outline JSON that strictly matches the schema.",
+    "Return a chapter-by-chapter outline JSON that strictly matches the schema, including `bookTitle`.",
     "Distribute words as a guideline only, not strict limits.",
   ].join("\n");
 }

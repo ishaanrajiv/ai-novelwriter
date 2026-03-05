@@ -154,9 +154,23 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
-async function loadActiveOutline(projectDir: string): Promise<OutlineResult> {
+async function loadActiveOutline(projectDir: string, fallbackBookTitle?: string): Promise<OutlineResult> {
   const filePath = path.join(projectDir, "stage1-outline", "active.json");
   const parsed = await readJsonFile<unknown>(filePath);
+
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    typeof (parsed as { bookTitle?: unknown }).bookTitle === "undefined" &&
+    fallbackBookTitle?.trim()
+  ) {
+    return OutlineResultSchema.parse({
+      ...parsed,
+      bookTitle: fallbackBookTitle.trim(),
+    });
+  }
+
   return OutlineResultSchema.parse(parsed);
 }
 
@@ -208,7 +222,7 @@ async function runStageOutline(args: {
       checkpointPath,
       checkpointUrl: toFileUrl(checkpointPath),
     });
-    return loadActiveOutline(args.paths.projectDir);
+    return loadActiveOutline(args.paths.projectDir, args.manifest.bookTitle);
   }
 
   emitProgress(args.progressReporter, PIPELINE_STEPS.outline, {
@@ -699,6 +713,15 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
     ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}),
     ...(args.force?.outline ? { force: true } : {}),
   });
+
+  const resolvedBookTitle = outline.bookTitle.trim();
+  if (resolvedBookTitle) {
+    config.userInput.bookTitle = resolvedBookTitle;
+    if (manifest.bookTitle !== resolvedBookTitle) {
+      manifest.bookTitle = resolvedBookTitle;
+      await saveManifest(paths.manifestPath, manifest);
+    }
+  }
 
   const blocks = await runStageBlocks({
     config,

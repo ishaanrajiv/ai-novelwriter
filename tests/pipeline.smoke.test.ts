@@ -38,6 +38,7 @@ class MockLLMClient implements LLMClient {
 
     if (options.stage === "outline") {
       const result: OutlineResult = {
+        bookTitle: "Auto Generated Smoke Title",
         globalStoryArc: "Hero transforms while confronting a hidden conspiracy.",
         chapters: Array.from({ length: this.chapterCount }, (_, index) => ({
           chapterNumber: index + 1,
@@ -137,6 +138,17 @@ function makeConfig(artifactsRoot: string): AppConfig {
   };
 }
 
+function makeAutoTitleConfig(artifactsRoot: string): AppConfig {
+  const base = makeConfig(artifactsRoot);
+  return {
+    ...base,
+    userInput: {
+      ...base.userInput,
+      bookTitle: "",
+    },
+  };
+}
+
 describe("pipeline smoke", () => {
   test("end-to-end run creates artifacts and epub", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "novel-smoke-"));
@@ -151,6 +163,18 @@ describe("pipeline smoke", () => {
 
     const epub = await exportProjectEpub({ artifactsRoot: root, projectId: result.projectId });
     await access(epub);
+  });
+
+  test("auto-generates title during outline and persists it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "novel-auto-title-"));
+    const config = makeAutoTitleConfig(root);
+    const mock = new MockLLMClient(config.userInput.chapterCount);
+
+    const result = await createAndRunProject({ config, deps: { llmClient: mock } });
+    const manifestSource = await readFile(path.join(result.projectDir, "manifest.json"), "utf-8");
+    const manifest = JSON.parse(manifestSource) as { bookTitle?: string };
+
+    expect(manifest.bookTitle).toBe("Auto Generated Smoke Title");
   });
 
   test("resume continues after injected failure", async () => {

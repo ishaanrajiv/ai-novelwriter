@@ -11,12 +11,22 @@ CLI-first novel generation pipeline in TypeScript (Bun), using:
 
 ## Environment
 
+Use a local `.env` file (recommended):
+
+```bash
+cp .env.example .env
+# then set OPENROUTER_API_KEY in .env
+```
+
+You can still use shell exports if you prefer:
+
 ```bash
 export OPENROUTER_API_KEY="your-key"
-# optional
 export OPENROUTER_HTTP_REFERER="https://your-app.example"
 export OPENROUTER_APP_NAME="AI Novel Writer"
 ```
+
+If required env vars are missing at launch, the CLI prompts for them and saves to `.env`.
 
 ## Install
 

@@ -30,7 +30,7 @@ export const RetryPolicySchema = z.object({
 });
 
 export const UserInputSchema = z.object({
-  bookTitle: z.string().min(1),
+  bookTitle: z.string().default(""),
   author: z.string().min(1),
   language: z.string().min(1).default("en"),
   premise: z.string().min(1),
@@ -60,6 +60,7 @@ export const OutlineChapterSchema = z.object({
 });
 
 export const OutlineResultSchema = z.object({
+  bookTitle: z.string().min(1),
   globalStoryArc: z.string().min(1),
   chapters: z.array(OutlineChapterSchema).min(1),
 });

@@ -50,9 +50,10 @@ export function buildInitialManifest(args: {
   nowIso?: string;
 }): ProjectManifest {
   const nowIso = args.nowIso ?? new Date().toISOString();
+  const initialTitle = args.userInput.bookTitle.trim() || "Untitled Novel";
   return {
     projectId: args.projectId,
-    bookTitle: args.userInput.bookTitle,
+    bookTitle: initialTitle,
     author: args.userInput.author,
     language: args.userInput.language,
     createdAt: nowIso,
