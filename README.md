@@ -1,5 +1,7 @@
 # AI Novel Writer (MVP)
 
+> Disclaimer: This is a learning project. I do not condone writing books with AI, and I do not recommend using this tool for anything apart from learning.
+
 CLI-first novel generation pipeline in TypeScript (Bun), using:
 - OpenRouter SDK provider: `@openrouter/ai-sdk-provider`
 - Vercel AI SDK: `ai`
