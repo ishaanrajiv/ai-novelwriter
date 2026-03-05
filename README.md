@@ -1,4 +1,4 @@
-# AI Novel Writer (MVP)
+# AI Novel Writer
 
 > Disclaimer: This is a learning project. I do not condone writing books with AI, and I do not recommend using this tool for anything apart from learning.
 
