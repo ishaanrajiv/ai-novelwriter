@@ -24,6 +24,25 @@ export OPENROUTER_APP_NAME="AI Novel Writer"
 bun install
 ```
 
+## Running The CLI
+
+From project root (fastest local workflow):
+
+```bash
+./ai-novelwriter --help
+./ai-novelwriter new
+./ai-novelwriter run --config ./config.example.yaml
+```
+
+Install globally once and call from anywhere:
+
+```bash
+bun run link:global
+ai-novelwriter --help
+# alias
+novelwriter --help
+```
+
 ## Build / Check / Test
 
 ```bash

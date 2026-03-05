@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import YAML from "js-yaml";
 import { z } from "zod";
@@ -55,6 +56,67 @@ import { withRetry } from "../utils/retry.js";
 export interface PipelineDeps {
   llmClient?: LLMClient;
   now?: () => Date;
+}
+
+export type PipelineStepId = "outline" | "blocks" | "chapter_drafts" | "export_epub";
+export type PipelineStepState = "in_progress" | "complete" | "skipped" | "failed";
+
+export interface PipelineProgressEvent {
+  stepId: PipelineStepId;
+  stepLabel: string;
+  stepIndex: number;
+  stepCount: number;
+  done: number;
+  total: number;
+  state: PipelineStepState;
+  message: string;
+  checkpointId?: string;
+  checkpointPath?: string;
+  checkpointUrl?: string;
+}
+
+export interface PipelineProgressReporter {
+  onProgress(event: PipelineProgressEvent): void;
+}
+
+interface PipelineStepMeta {
+  id: PipelineStepId;
+  label: string;
+  index: number;
+  count: number;
+}
+
+const PIPELINE_STEPS: Record<PipelineStepId, PipelineStepMeta> = {
+  outline: { id: "outline", label: "Outline", index: 1, count: 4 },
+  blocks: { id: "blocks", label: "Story Blocks", index: 2, count: 4 },
+  chapter_drafts: { id: "chapter_drafts", label: "Chapter Drafts", index: 3, count: 4 },
+  export_epub: { id: "export_epub", label: "EPUB Export", index: 4, count: 4 },
+};
+
+function toFileUrl(filePath: string): string {
+  return pathToFileURL(filePath).toString();
+}
+
+function emitProgress(
+  reporter: PipelineProgressReporter | undefined,
+  step: PipelineStepMeta,
+  event: Omit<PipelineProgressEvent, "stepId" | "stepLabel" | "stepIndex" | "stepCount">,
+): void {
+  if (!reporter) {
+    return;
+  }
+
+  try {
+    reporter.onProgress({
+      stepId: step.id,
+      stepLabel: step.label,
+      stepIndex: step.index,
+      stepCount: step.count,
+      ...event,
+    });
+  } catch {
+    // Rendering should never break generation.
+  }
 }
 
 const BLOCK_DRAFT_SCHEMA = z.object({
@@ -129,14 +191,33 @@ async function runStageOutline(args: {
   paths: ReturnType<typeof getProjectPaths>;
   manifest: ProjectManifest;
   llmClient: LLMClient;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
   force?: boolean;
 }): Promise<OutlineResult> {
   const checkpointId = checkpointIdForOutline();
   const currentStatus = getCheckpointStatus(args.manifest, checkpointId);
   if (!args.force && currentStatus === "complete") {
+    const checkpointPath = path.join(args.paths.outlineDir, "active.json");
+    emitProgress(args.progressReporter, PIPELINE_STEPS.outline, {
+      done: 1,
+      total: 1,
+      state: "skipped",
+      message: "Using existing outline checkpoint.",
+      checkpointId,
+      checkpointPath,
+      checkpointUrl: toFileUrl(checkpointPath),
+    });
     return loadActiveOutline(args.paths.projectDir);
   }
+
+  emitProgress(args.progressReporter, PIPELINE_STEPS.outline, {
+    done: 0,
+    total: 1,
+    state: "in_progress",
+    message: "Generating story outline...",
+    checkpointId,
+  });
 
   setCheckpoint(args.manifest, checkpointId, "in_progress", args.manifest.activePointers.outlineAttempt);
   await saveManifest(args.paths.manifestPath, args.manifest);
@@ -161,6 +242,16 @@ async function runStageOutline(args: {
     setCheckpoint(args.manifest, checkpointId, "complete", stored.attempt);
     await saveManifest(args.paths.manifestPath, args.manifest);
 
+    emitProgress(args.progressReporter, PIPELINE_STEPS.outline, {
+      done: 1,
+      total: 1,
+      state: "complete",
+      message: "Outline checkpoint written.",
+      checkpointId,
+      checkpointPath: stored.activePath,
+      checkpointUrl: toFileUrl(stored.activePath),
+    });
+
     await appendEvent(args.paths.projectDir, {
       ts: new Date().toISOString(),
       level: "info",
@@ -172,6 +263,13 @@ async function runStageOutline(args: {
   } catch (error) {
     setCheckpoint(args.manifest, checkpointId, "failed", args.manifest.activePointers.outlineAttempt, toErrorMessage(error));
     await saveManifest(args.paths.manifestPath, args.manifest);
+    emitProgress(args.progressReporter, PIPELINE_STEPS.outline, {
+      done: 0,
+      total: 1,
+      state: "failed",
+      message: `Outline generation failed: ${toErrorMessage(error)}`,
+      checkpointId,
+    });
     throw error;
   }
 }
@@ -182,12 +280,22 @@ async function runStageBlocks(args: {
   manifest: ProjectManifest;
   llmClient: LLMClient;
   outline: OutlineResult;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
   forceChapter?: number;
 }): Promise<Map<number, StoryBlocksResult>> {
   const map = new Map<number, StoryBlocksResult>();
   const system = buildSystemPrompt(args.config.userInput.systemPromptTemplate);
   const model = resolveModel(args.config, "blocks", args.modelOverride);
+  const totalChapters = args.outline.chapters.length;
+  let completedChapters = 0;
+
+  emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+    done: 0,
+    total: totalChapters,
+    state: "in_progress",
+    message: totalChapters > 0 ? "Planning chapter block structures..." : "No chapters to plan.",
+  });
 
   for (const chapter of args.outline.chapters) {
     const chapterId = chapter.chapterNumber;
@@ -196,13 +304,43 @@ async function runStageBlocks(args: {
 
     if (!args.forceChapter && status === "complete") {
       map.set(chapterId, await loadActiveChapterBlocks(args.paths.projectDir, chapterId));
+      completedChapters += 1;
+      const checkpointPath = path.join(args.paths.blocksDir, `${chapterKey(chapterId)}.active.json`);
+      emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+        done: completedChapters,
+        total: totalChapters,
+        state: "skipped",
+        message: `Reusing block plan for chapter ${chapterId}.`,
+        checkpointId,
+        checkpointPath,
+        checkpointUrl: toFileUrl(checkpointPath),
+      });
       continue;
     }
 
     if (args.forceChapter && args.forceChapter !== chapterId && status === "complete") {
       map.set(chapterId, await loadActiveChapterBlocks(args.paths.projectDir, chapterId));
+      completedChapters += 1;
+      const checkpointPath = path.join(args.paths.blocksDir, `${chapterKey(chapterId)}.active.json`);
+      emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+        done: completedChapters,
+        total: totalChapters,
+        state: "skipped",
+        message: `Reusing block plan for chapter ${chapterId}.`,
+        checkpointId,
+        checkpointPath,
+        checkpointUrl: toFileUrl(checkpointPath),
+      });
       continue;
     }
+
+    emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+      done: completedChapters,
+      total: totalChapters,
+      state: "in_progress",
+      message: `Planning blocks for chapter ${chapterId}...`,
+      checkpointId,
+    });
 
     setCheckpoint(
       args.manifest,
@@ -234,6 +372,17 @@ async function runStageBlocks(args: {
       args.manifest.activePointers.blocksAttempts[chapterKey(chapterId)] = stored.attempt;
       setCheckpoint(args.manifest, checkpointId, "complete", stored.attempt);
       await saveManifest(args.paths.manifestPath, args.manifest);
+      completedChapters += 1;
+
+      emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+        done: completedChapters,
+        total: totalChapters,
+        state: completedChapters >= totalChapters ? "complete" : "in_progress",
+        message: `Block plan ready for chapter ${chapterId}.`,
+        checkpointId,
+        checkpointPath: stored.activePath,
+        checkpointUrl: toFileUrl(stored.activePath),
+      });
 
       await appendEvent(args.paths.projectDir, {
         ts: new Date().toISOString(),
@@ -252,8 +401,24 @@ async function runStageBlocks(args: {
         toErrorMessage(error),
       );
       await saveManifest(args.paths.manifestPath, args.manifest);
+      emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+        done: completedChapters,
+        total: totalChapters,
+        state: "failed",
+        message: `Block planning failed for chapter ${chapterId}: ${toErrorMessage(error)}`,
+        checkpointId,
+      });
       throw error;
     }
+  }
+
+  if (totalChapters === 0) {
+    emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
+      done: 0,
+      total: 0,
+      state: "complete",
+      message: "No chapters required block planning.",
+    });
   }
 
   return map;
@@ -266,24 +431,47 @@ async function runStageChapterDrafts(args: {
   llmClient: LLMClient;
   outline: OutlineResult;
   chapterBlocks: Map<number, StoryBlocksResult>;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
   forceChapter?: number;
   forceBlock?: { chapterNumber: number; blockNumber: number };
 }): Promise<void> {
   const system = buildSystemPrompt(args.config.userInput.systemPromptTemplate);
   const model = resolveModel(args.config, "chapter", args.modelOverride);
+  const totalBlocks = args.outline.chapters.reduce((sum, chapter) => {
+    return sum + (args.chapterBlocks.get(chapter.chapterNumber)?.blocks.length ?? 0);
+  }, 0);
+  let completedBlocks = 0;
+
+  emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+    done: 0,
+    total: totalBlocks,
+    state: "in_progress",
+    message: totalBlocks > 0 ? "Drafting chapter blocks..." : "No chapter blocks to draft.",
+  });
 
   for (const chapter of args.outline.chapters) {
     const chapterNumber = chapter.chapterNumber;
     const chapterCheckpoint = checkpointIdForChapter(chapterNumber);
     const chapterStatus = getCheckpointStatus(args.manifest, chapterCheckpoint);
     const shouldForceChapter = args.forceChapter === chapterNumber;
+    const chapterPlan = args.chapterBlocks.get(chapterNumber) ?? (await loadActiveChapterBlocks(args.paths.projectDir, chapterNumber));
 
     if (!shouldForceChapter && !args.forceBlock && chapterStatus === "complete") {
+      completedBlocks += chapterPlan.blocks.length;
+      const checkpointPath = path.join(args.paths.chapterDir, chapterKey(chapterNumber), "chapter.active.md");
+      emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+        done: completedBlocks,
+        total: totalBlocks,
+        state: completedBlocks >= totalBlocks ? "complete" : "skipped",
+        message: `Reusing completed chapter ${chapterNumber}.`,
+        checkpointId: chapterCheckpoint,
+        checkpointPath,
+        checkpointUrl: toFileUrl(checkpointPath),
+      });
       continue;
     }
 
-    const chapterPlan = args.chapterBlocks.get(chapterNumber) ?? (await loadActiveChapterBlocks(args.paths.projectDir, chapterNumber));
     let rollingSummary = initialRollingSummary();
     let chapterText = "";
     const blockTexts: string[] = [];
@@ -301,9 +489,32 @@ async function runStageChapterDrafts(args: {
           rollingSummary = existing.updatedSummary;
           chapterText = `${chapterText}\n\n${existing.text}`.trim();
           blockTexts.push(existing.text);
+          completedBlocks += 1;
+          const checkpointPath = path.join(
+            args.paths.chapterDir,
+            chapterKey(chapterNumber),
+            `${blockKey(block.blockNumber)}.active.json`,
+          );
+          emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+            done: completedBlocks,
+            total: totalBlocks,
+            state: completedBlocks >= totalBlocks ? "complete" : "skipped",
+            message: `Reusing chapter ${chapterNumber} block ${block.blockNumber}.`,
+            checkpointId: blockCheckpoint,
+            checkpointPath,
+            checkpointUrl: toFileUrl(checkpointPath),
+          });
           continue;
         }
       }
+
+      emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+        done: completedBlocks,
+        total: totalBlocks,
+        state: "in_progress",
+        message: `Drafting chapter ${chapterNumber} block ${block.blockNumber}...`,
+        checkpointId: blockCheckpoint,
+      });
 
       setCheckpoint(
         args.manifest,
@@ -348,6 +559,17 @@ async function runStageChapterDrafts(args: {
         chapterAttempts[blockKey(block.blockNumber)] = stored.attempt;
         setCheckpoint(args.manifest, blockCheckpoint, "complete", stored.attempt);
         await saveManifest(args.paths.manifestPath, args.manifest);
+        completedBlocks += 1;
+
+        emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+          done: completedBlocks,
+          total: totalBlocks,
+          state: completedBlocks >= totalBlocks ? "complete" : "in_progress",
+          message: `Draft ready for chapter ${chapterNumber} block ${block.blockNumber}.`,
+          checkpointId: blockCheckpoint,
+          checkpointPath: stored.activePath,
+          checkpointUrl: toFileUrl(stored.activePath),
+        });
 
         rollingSummary = parsed.updatedSummary;
         chapterText = `${chapterText}\n\n${parsed.text}`.trim();
@@ -361,6 +583,13 @@ async function runStageChapterDrafts(args: {
           toErrorMessage(error),
         );
         await saveManifest(args.paths.manifestPath, args.manifest);
+        emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+          done: completedBlocks,
+          total: totalBlocks,
+          state: "failed",
+          message: `Draft failed for chapter ${chapterNumber} block ${block.blockNumber}: ${toErrorMessage(error)}`,
+          checkpointId: blockCheckpoint,
+        });
         throw error;
       }
     }
@@ -370,7 +599,34 @@ async function runStageChapterDrafts(args: {
     args.manifest.activePointers.chapterAttempts[chapterKey(chapterNumber)] = chapterStored.attempt;
     setCheckpoint(args.manifest, chapterCheckpoint, "complete", chapterStored.attempt);
     await saveManifest(args.paths.manifestPath, args.manifest);
+
+    emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+      done: completedBlocks,
+      total: totalBlocks,
+      state: completedBlocks >= totalBlocks ? "complete" : "in_progress",
+      message: `Assembled chapter ${chapterNumber} markdown.`,
+      checkpointId: chapterCheckpoint,
+      checkpointPath: chapterStored.activePath,
+      checkpointUrl: toFileUrl(chapterStored.activePath),
+    });
   }
+
+  if (totalBlocks === 0) {
+    emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+      done: 0,
+      total: 0,
+      state: "complete",
+      message: "No chapter drafts were needed.",
+    });
+    return;
+  }
+
+  emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
+    done: completedBlocks,
+    total: totalBlocks,
+    state: "complete",
+    message: "All chapter drafts are ready.",
+  });
 }
 
 function normalizeArtifactsRoot(root: string): string {
@@ -380,6 +636,7 @@ function normalizeArtifactsRoot(root: string): string {
 export interface RunProjectOptions {
   config: AppConfig;
   deps?: PipelineDeps;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
   projectId?: string;
 }
@@ -405,6 +662,7 @@ export async function createAndRunProject(options: RunProjectOptions): Promise<{
     artifactsRoot,
     projectId,
     ...(options.deps ? { deps: options.deps } : {}),
+    ...(options.progressReporter ? { progressReporter: options.progressReporter } : {}),
     ...(options.modelOverride ? { modelOverride: options.modelOverride } : {}),
   });
 
@@ -415,6 +673,7 @@ interface RunPipelineArgs {
   artifactsRoot: string;
   projectId: string;
   deps?: PipelineDeps;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
   force?: {
     outline?: boolean;
@@ -436,6 +695,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
     paths,
     manifest,
     llmClient,
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
     ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}),
     ...(args.force?.outline ? { force: true } : {}),
   });
@@ -446,6 +706,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
     manifest,
     llmClient,
     outline,
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
     ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}),
     ...(typeof args.force?.blocksChapter === "number" ? { forceChapter: args.force.blocksChapter } : {}),
   });
@@ -457,6 +718,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
     llmClient,
     outline,
     chapterBlocks: blocks,
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
     ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}),
     ...(typeof args.force?.chapter === "number" ? { forceChapter: args.force.chapter } : {}),
     ...(args.force?.block ? { forceBlock: args.force.block } : {}),
@@ -465,6 +727,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
   await exportProjectEpub({
     artifactsRoot,
     projectId: args.projectId,
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
   });
 }
 
@@ -478,6 +741,7 @@ export async function resumeProject(args: {
   artifactsRoot: string;
   projectId: string;
   deps?: PipelineDeps;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
 }): Promise<void> {
   await runPipeline(args);
@@ -562,6 +826,7 @@ export async function regenerateProject(args: {
   chapter?: number;
   block?: number;
   deps?: PipelineDeps;
+  progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
 }): Promise<void> {
   const artifactsRoot = normalizeArtifactsRoot(args.artifactsRoot);
@@ -575,6 +840,7 @@ export async function regenerateProject(args: {
     artifactsRoot,
     projectId: args.projectId,
     ...(args.deps ? { deps: args.deps } : {}),
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
     ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}),
     force: {
       ...(args.target === "outline" ? { outline: true } : {}),
@@ -587,10 +853,36 @@ export async function regenerateProject(args: {
   });
 }
 
-export async function exportProjectEpub(args: { artifactsRoot: string; projectId: string }): Promise<string> {
+export interface ExportProgressStep {
+  stepIndex: number;
+  stepCount: number;
+  stepLabel?: string;
+}
+
+export async function exportProjectEpub(args: {
+  artifactsRoot: string;
+  projectId: string;
+  progressReporter?: PipelineProgressReporter;
+  progressStep?: ExportProgressStep;
+}): Promise<string> {
   const artifactsRoot = normalizeArtifactsRoot(args.artifactsRoot);
   const paths = getProjectPaths(artifactsRoot, args.projectId);
   const manifest = await loadManifest(paths.manifestPath);
+  const exportStepMeta: PipelineStepMeta = {
+    id: PIPELINE_STEPS.export_epub.id,
+    label: args.progressStep?.stepLabel ?? PIPELINE_STEPS.export_epub.label,
+    index: args.progressStep?.stepIndex ?? PIPELINE_STEPS.export_epub.index,
+    count: args.progressStep?.stepCount ?? PIPELINE_STEPS.export_epub.count,
+  };
+  const checkpointId = checkpointIdForExportEpub();
+
+  emitProgress(args.progressReporter, exportStepMeta, {
+    done: 0,
+    total: 1,
+    state: "in_progress",
+    message: "Packaging EPUB export...",
+    checkpointId,
+  });
 
   const epubPath = await exportStyledEpub({
     projectDir: paths.projectDir,
@@ -604,8 +896,18 @@ export async function exportProjectEpub(args: { artifactsRoot: string; projectId
     },
   });
 
-  setCheckpoint(manifest, checkpointIdForExportEpub(), "complete", 1);
+  setCheckpoint(manifest, checkpointId, "complete", 1);
   await saveManifest(paths.manifestPath, manifest);
+
+  emitProgress(args.progressReporter, exportStepMeta, {
+    done: 1,
+    total: 1,
+    state: "complete",
+    message: "EPUB export complete.",
+    checkpointId,
+    checkpointPath: epubPath,
+    checkpointUrl: toFileUrl(epubPath),
+  });
 
   return epubPath;
 }

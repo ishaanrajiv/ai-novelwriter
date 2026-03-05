@@ -9,6 +9,7 @@ import {
   regenerateProject,
   resumeProject,
 } from "../pipeline/service.js";
+import { createCliProgressReporter } from "./progress.js";
 import { runInteractiveWizard } from "./wizard.js";
 
 function parseIntOption(value: string | undefined, name: string): number | undefined {
@@ -40,8 +41,10 @@ export function buildCli(): Command {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
       const config = await runInteractiveWizard(artifactsRoot);
+      const progressReporter = createCliProgressReporter();
       const result = await createAndRunProject({
         config,
+        progressReporter,
         ...(modelOverride ? { modelOverride } : {}),
       });
       console.log(`Project created and generated: ${result.projectId}`);
@@ -57,9 +60,11 @@ export function buildCli(): Command {
       const modelOverride = program.opts<{ model?: string }>().model;
       const config = await loadConfigFromYaml(options.config);
       config.runtime.artifactsRoot = artifactsRoot;
+      const progressReporter = createCliProgressReporter();
 
       const result = await createAndRunProject({
         config,
+        progressReporter,
         ...(modelOverride ? { modelOverride } : {}),
       });
       console.log(`Project created and generated: ${result.projectId}`);
@@ -73,9 +78,11 @@ export function buildCli(): Command {
     .action(async (options: { projectId: string }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
+      const progressReporter = createCliProgressReporter();
       await resumeProject({
         artifactsRoot,
         projectId: options.projectId,
+        progressReporter,
         ...(modelOverride ? { modelOverride } : {}),
       });
       console.log(`Resumed project: ${options.projectId}`);
@@ -93,6 +100,7 @@ export function buildCli(): Command {
       const modelOverride = program.opts<{ model?: string }>().model;
       const chapter = parseIntOption(options.chapter, "chapter");
       const block = parseIntOption(options.block, "block");
+      const progressReporter = createCliProgressReporter();
 
       if (!["outline", "blocks", "chapter", "block"].includes(options.target)) {
         throw new Error("target must be one of: outline, blocks, chapter, block");
@@ -102,6 +110,7 @@ export function buildCli(): Command {
         artifactsRoot,
         projectId: options.projectId,
         target: options.target as "outline" | "blocks" | "chapter" | "block",
+        progressReporter,
         ...(chapter ? { chapter } : {}),
         ...(block ? { block } : {}),
         ...(modelOverride ? { modelOverride } : {}),
@@ -118,9 +127,16 @@ export function buildCli(): Command {
     .description("Generate EPUB from active chapter markdown files")
     .action(async (options: { projectId: string }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+      const progressReporter = createCliProgressReporter();
       const epubPath = await exportProjectEpub({
         artifactsRoot,
         projectId: options.projectId,
+        progressReporter,
+        progressStep: {
+          stepIndex: 1,
+          stepCount: 1,
+          stepLabel: "EPUB Export",
+        },
       });
 
       console.log(`EPUB generated: ${epubPath}`);

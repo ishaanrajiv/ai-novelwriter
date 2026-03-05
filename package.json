@@ -4,11 +4,15 @@
   "description": "CLI-first AI novel writer with resumable pipeline",
   "type": "module",
   "bin": {
-    "ai-novelwriter": "./dist/index.js"
+    "ai-novelwriter": "./bin/ai-novelwriter.js",
+    "novelwriter": "./bin/ai-novelwriter.js"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
+    "start": "node ./bin/ai-novelwriter.js",
     "build": "bun build src/index.ts --target=node --outfile dist/index.js",
+    "prepare": "bun run build",
+    "link:global": "bun link",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
