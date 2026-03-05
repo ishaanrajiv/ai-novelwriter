@@ -41,6 +41,7 @@ From project root (fastest local workflow):
 ```bash
 ./ai-novelwriter --help
 ./ai-novelwriter new
+./ai-novelwriter new --args
 ./ai-novelwriter run --config ./config.example.yaml
 ```
 
@@ -65,7 +66,9 @@ bun test
 
 ```bash
 ai-novelwriter new
+ai-novelwriter new --args
 ai-novelwriter run --config ./config.example.yaml
+ai-novelwriter resume
 ai-novelwriter resume --project-id <projectId>
 ai-novelwriter regen --project-id <projectId> --target outline
 ai-novelwriter regen --project-id <projectId> --target blocks --chapter 3
@@ -79,6 +82,9 @@ ai-novelwriter list
 Global options:
 - `--artifacts-root <path>` default: `.artifacts/novels`
 - `--model <openrouter-model-id>` overrides all stage models for the run
+
+`new` command option:
+- `--args` asks advanced wizard arguments (model overrides, prompt template fields, block policy, retry policy). Without this flag, only core prompts are asked and advanced values use defaults.
 
 ## Artifact Layout
 
@@ -101,5 +107,6 @@ Each project contains:
 ## Notes
 
 - Resume skips completed checkpoints by default.
+- `resume` with no `--project-id` picks the most recently updated incomplete project.
 - Regeneration creates versioned `attempt-xxx` artifacts and updates active pointers.
 - Pipeline runs auto-export EPUB after chapter generation completes.

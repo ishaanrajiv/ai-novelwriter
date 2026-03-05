@@ -37,10 +37,11 @@ export function buildCli(): Command {
   program
     .command("new")
     .description("Start interactive wizard, save config, and run a new novel project")
-    .action(async () => {
+    .option("--args", "Ask advanced wizard arguments")
+    .action(async (options: { args?: boolean }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
-      const config = await runInteractiveWizard(artifactsRoot);
+      const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.args) });
       const progressReporter = createCliProgressReporter();
       const result = await createAndRunProject({
         config,
@@ -74,18 +75,18 @@ export function buildCli(): Command {
   program
     .command("resume")
     .description("Resume an existing project from the first incomplete checkpoint")
-    .requiredOption("--project-id <id>", "Project ID")
-    .action(async (options: { projectId: string }) => {
+    .option("--project-id <id>", "Project ID (defaults to most recent incomplete project)")
+    .action(async (options: { projectId?: string }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
       const progressReporter = createCliProgressReporter();
-      await resumeProject({
+      const projectId = await resumeProject({
         artifactsRoot,
-        projectId: options.projectId,
         progressReporter,
+        ...(options.projectId ? { projectId: options.projectId } : {}),
         ...(modelOverride ? { modelOverride } : {}),
       });
-      console.log(`Resumed project: ${options.projectId}`);
+      console.log(`Resumed project: ${projectId}`);
     });
 
   program

@@ -74,9 +74,25 @@ export async function loadManifest(manifestPath: string): Promise<ProjectManifes
   return ProjectManifestSchema.parse(parsed);
 }
 
+const manifestWriteQueue = new Map<string, Promise<void>>();
+
 export async function saveManifest(manifestPath: string, manifest: ProjectManifest): Promise<void> {
-  manifest.updatedAt = new Date().toISOString();
-  await writeJsonAtomic(manifestPath, manifest);
+  const previous = manifestWriteQueue.get(manifestPath) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      manifest.updatedAt = new Date().toISOString();
+      await writeJsonAtomic(manifestPath, manifest);
+    });
+
+  manifestWriteQueue.set(manifestPath, next);
+  try {
+    await next;
+  } finally {
+    if (manifestWriteQueue.get(manifestPath) === next) {
+      manifestWriteQueue.delete(manifestPath);
+    }
+  }
 }
 
 export function checkpointIdForOutline(): string {

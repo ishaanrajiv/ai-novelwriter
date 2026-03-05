@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { access, readFile, readdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -49,7 +49,7 @@ import {
 } from "../state/manifest.js";
 import type { CheckpointStatus, RetryPolicy } from "../types/index.js";
 import { ensureDir, readJsonFile, writeJsonAtomic } from "../utils/fs.js";
-import { blockKey, chapterKey, createProjectId, slugify } from "../utils/ids.js";
+import { blockKey, chapterKey, createProjectId, formatLocalTimestamp, slugify } from "../utils/ids.js";
 import { appendEvent } from "../utils/logger.js";
 import { withRetry } from "../utils/retry.js";
 
@@ -92,6 +92,8 @@ const PIPELINE_STEPS: Record<PipelineStepId, PipelineStepMeta> = {
   chapter_drafts: { id: "chapter_drafts", label: "Chapter Drafts", index: 3, count: 4 },
   export_epub: { id: "export_epub", label: "EPUB Export", index: 4, count: 4 },
 };
+
+const MAX_CHAPTER_CONCURRENCY = 4;
 
 function toFileUrl(filePath: string): string {
   return pathToFileURL(filePath).toString();
@@ -152,6 +154,49 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+async function runWithConcurrencyLimit<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), items.length));
+  let nextIndex = 0;
+  let firstError: unknown;
+
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      if (firstError) {
+        return;
+      }
+
+      const itemIndex = nextIndex;
+      if (itemIndex >= items.length) {
+        return;
+      }
+      nextIndex += 1;
+
+      try {
+        await worker(items[itemIndex]!);
+      } catch (error) {
+        if (!firstError) {
+          firstError = error;
+        }
+        return;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+
+  if (firstError) {
+    throw firstError;
+  }
 }
 
 async function loadActiveOutline(projectDir: string, fallbackBookTitle?: string): Promise<OutlineResult> {
@@ -302,7 +347,12 @@ async function runStageBlocks(args: {
   const system = buildSystemPrompt(args.config.userInput.systemPromptTemplate);
   const model = resolveModel(args.config, "blocks", args.modelOverride);
   const totalChapters = args.outline.chapters.length;
+  const chapterConcurrency = Math.min(MAX_CHAPTER_CONCURRENCY, Math.max(1, totalChapters));
   let completedChapters = 0;
+  const markChapterDone = (): number => {
+    completedChapters += 1;
+    return completedChapters;
+  };
 
   emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
     done: 0,
@@ -311,17 +361,17 @@ async function runStageBlocks(args: {
     message: totalChapters > 0 ? "Planning chapter block structures..." : "No chapters to plan.",
   });
 
-  for (const chapter of args.outline.chapters) {
+  await runWithConcurrencyLimit(args.outline.chapters, chapterConcurrency, async (chapter) => {
     const chapterId = chapter.chapterNumber;
     const checkpointId = checkpointIdForBlocks(chapterId);
     const status = getCheckpointStatus(args.manifest, checkpointId);
 
     if (!args.forceChapter && status === "complete") {
       map.set(chapterId, await loadActiveChapterBlocks(args.paths.projectDir, chapterId));
-      completedChapters += 1;
+      const done = markChapterDone();
       const checkpointPath = path.join(args.paths.blocksDir, `${chapterKey(chapterId)}.active.json`);
       emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
-        done: completedChapters,
+        done,
         total: totalChapters,
         state: "skipped",
         message: `Reusing block plan for chapter ${chapterId}.`,
@@ -329,15 +379,15 @@ async function runStageBlocks(args: {
         checkpointPath,
         checkpointUrl: toFileUrl(checkpointPath),
       });
-      continue;
+      return;
     }
 
     if (args.forceChapter && args.forceChapter !== chapterId && status === "complete") {
       map.set(chapterId, await loadActiveChapterBlocks(args.paths.projectDir, chapterId));
-      completedChapters += 1;
+      const done = markChapterDone();
       const checkpointPath = path.join(args.paths.blocksDir, `${chapterKey(chapterId)}.active.json`);
       emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
-        done: completedChapters,
+        done,
         total: totalChapters,
         state: "skipped",
         message: `Reusing block plan for chapter ${chapterId}.`,
@@ -345,7 +395,7 @@ async function runStageBlocks(args: {
         checkpointPath,
         checkpointUrl: toFileUrl(checkpointPath),
       });
-      continue;
+      return;
     }
 
     emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
@@ -386,12 +436,12 @@ async function runStageBlocks(args: {
       args.manifest.activePointers.blocksAttempts[chapterKey(chapterId)] = stored.attempt;
       setCheckpoint(args.manifest, checkpointId, "complete", stored.attempt);
       await saveManifest(args.paths.manifestPath, args.manifest);
-      completedChapters += 1;
+      const done = markChapterDone();
 
       emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
-        done: completedChapters,
+        done,
         total: totalChapters,
-        state: completedChapters >= totalChapters ? "complete" : "in_progress",
+        state: done >= totalChapters ? "complete" : "in_progress",
         message: `Block plan ready for chapter ${chapterId}.`,
         checkpointId,
         checkpointPath: stored.activePath,
@@ -424,7 +474,7 @@ async function runStageBlocks(args: {
       });
       throw error;
     }
-  }
+  });
 
   if (totalChapters === 0) {
     emitProgress(args.progressReporter, PIPELINE_STEPS.blocks, {
@@ -455,7 +505,12 @@ async function runStageChapterDrafts(args: {
   const totalBlocks = args.outline.chapters.reduce((sum, chapter) => {
     return sum + (args.chapterBlocks.get(chapter.chapterNumber)?.blocks.length ?? 0);
   }, 0);
+  const chapterConcurrency = Math.min(MAX_CHAPTER_CONCURRENCY, Math.max(1, args.outline.chapters.length));
   let completedBlocks = 0;
+  const addCompletedBlocks = (count: number): number => {
+    completedBlocks += count;
+    return completedBlocks;
+  };
 
   emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
     done: 0,
@@ -464,7 +519,7 @@ async function runStageChapterDrafts(args: {
     message: totalBlocks > 0 ? "Drafting chapter blocks..." : "No chapter blocks to draft.",
   });
 
-  for (const chapter of args.outline.chapters) {
+  await runWithConcurrencyLimit(args.outline.chapters, chapterConcurrency, async (chapter) => {
     const chapterNumber = chapter.chapterNumber;
     const chapterCheckpoint = checkpointIdForChapter(chapterNumber);
     const chapterStatus = getCheckpointStatus(args.manifest, chapterCheckpoint);
@@ -472,18 +527,18 @@ async function runStageChapterDrafts(args: {
     const chapterPlan = args.chapterBlocks.get(chapterNumber) ?? (await loadActiveChapterBlocks(args.paths.projectDir, chapterNumber));
 
     if (!shouldForceChapter && !args.forceBlock && chapterStatus === "complete") {
-      completedBlocks += chapterPlan.blocks.length;
+      const done = addCompletedBlocks(chapterPlan.blocks.length);
       const checkpointPath = path.join(args.paths.chapterDir, chapterKey(chapterNumber), "chapter.active.md");
       emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
-        done: completedBlocks,
+        done,
         total: totalBlocks,
-        state: completedBlocks >= totalBlocks ? "complete" : "skipped",
+        state: done >= totalBlocks ? "complete" : "skipped",
         message: `Reusing completed chapter ${chapterNumber}.`,
         checkpointId: chapterCheckpoint,
         checkpointPath,
         checkpointUrl: toFileUrl(checkpointPath),
       });
-      continue;
+      return;
     }
 
     let rollingSummary = initialRollingSummary();
@@ -503,16 +558,16 @@ async function runStageChapterDrafts(args: {
           rollingSummary = existing.updatedSummary;
           chapterText = `${chapterText}\n\n${existing.text}`.trim();
           blockTexts.push(existing.text);
-          completedBlocks += 1;
+          const done = addCompletedBlocks(1);
           const checkpointPath = path.join(
             args.paths.chapterDir,
             chapterKey(chapterNumber),
             `${blockKey(block.blockNumber)}.active.json`,
           );
           emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
-            done: completedBlocks,
+            done,
             total: totalBlocks,
-            state: completedBlocks >= totalBlocks ? "complete" : "skipped",
+            state: done >= totalBlocks ? "complete" : "skipped",
             message: `Reusing chapter ${chapterNumber} block ${block.blockNumber}.`,
             checkpointId: blockCheckpoint,
             checkpointPath,
@@ -573,12 +628,12 @@ async function runStageChapterDrafts(args: {
         chapterAttempts[blockKey(block.blockNumber)] = stored.attempt;
         setCheckpoint(args.manifest, blockCheckpoint, "complete", stored.attempt);
         await saveManifest(args.paths.manifestPath, args.manifest);
-        completedBlocks += 1;
+        const done = addCompletedBlocks(1);
 
         emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
-          done: completedBlocks,
+          done,
           total: totalBlocks,
-          state: completedBlocks >= totalBlocks ? "complete" : "in_progress",
+          state: done >= totalBlocks ? "complete" : "in_progress",
           message: `Draft ready for chapter ${chapterNumber} block ${block.blockNumber}.`,
           checkpointId: blockCheckpoint,
           checkpointPath: stored.activePath,
@@ -623,7 +678,7 @@ async function runStageChapterDrafts(args: {
       checkpointPath: chapterStored.activePath,
       checkpointUrl: toFileUrl(chapterStored.activePath),
     });
-  }
+  });
 
   if (totalBlocks === 0) {
     emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_drafts, {
@@ -647,6 +702,34 @@ function normalizeArtifactsRoot(root: string): string {
   return path.isAbsolute(root) ? root : path.resolve(process.cwd(), root);
 }
 
+function projectTimestampPrefix(projectId: string): string {
+  const match = projectId.match(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/);
+  return match?.[0] ?? formatLocalTimestamp(new Date());
+}
+
+async function nextAvailableProjectId(
+  artifactsRootAbs: string,
+  desiredProjectId: string,
+  currentProjectId: string,
+): Promise<string> {
+  if (desiredProjectId === currentProjectId) {
+    return currentProjectId;
+  }
+
+  let candidate = desiredProjectId;
+  let suffix = 2;
+  while (true) {
+    const candidateDir = getProjectPaths(artifactsRootAbs, candidate).projectDir;
+    try {
+      await access(candidateDir);
+      candidate = `${desiredProjectId}-${suffix}`;
+      suffix += 1;
+    } catch {
+      return candidate;
+    }
+  }
+}
+
 export interface RunProjectOptions {
   config: AppConfig;
   deps?: PipelineDeps;
@@ -660,6 +743,7 @@ export async function createAndRunProject(options: RunProjectOptions): Promise<{
   const projectId = options.projectId ?? createProjectId(options.config.userInput.bookTitle, now());
   const artifactsRoot = normalizeArtifactsRoot(options.config.runtime.artifactsRoot);
   const paths = getProjectPaths(artifactsRoot, projectId);
+  const retitleProjectIdFromOutline = !options.projectId && !options.config.userInput.bookTitle.trim();
 
   await initProjectDirs(paths);
   await saveConfigAsYaml(paths.projectYamlPath, options.config);
@@ -672,20 +756,22 @@ export async function createAndRunProject(options: RunProjectOptions): Promise<{
   });
   await saveManifest(paths.manifestPath, manifest);
 
-  await runPipeline({
+  const finalProjectId = await runPipeline({
     artifactsRoot,
     projectId,
+    retitleProjectIdFromOutline,
     ...(options.deps ? { deps: options.deps } : {}),
     ...(options.progressReporter ? { progressReporter: options.progressReporter } : {}),
     ...(options.modelOverride ? { modelOverride: options.modelOverride } : {}),
   });
 
-  return { projectId, projectDir: paths.projectDir };
+  return { projectId: finalProjectId, projectDir: getProjectPaths(artifactsRoot, finalProjectId).projectDir };
 }
 
 interface RunPipelineArgs {
   artifactsRoot: string;
   projectId: string;
+  retitleProjectIdFromOutline?: boolean;
   deps?: PipelineDeps;
   progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
@@ -697,9 +783,10 @@ interface RunPipelineArgs {
   };
 }
 
-export async function runPipeline(args: RunPipelineArgs): Promise<void> {
+export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   const artifactsRoot = normalizeArtifactsRoot(args.artifactsRoot);
-  const paths = getProjectPaths(artifactsRoot, args.projectId);
+  let projectId = args.projectId;
+  let paths = getProjectPaths(artifactsRoot, projectId);
   const config = await readProjectConfig(paths.projectYamlPath);
   const manifest = await loadManifest(paths.manifestPath);
   const llmClient = args.deps?.llmClient ?? createOpenRouterLLMClient();
@@ -717,10 +804,22 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
   const resolvedBookTitle = outline.bookTitle.trim();
   if (resolvedBookTitle) {
     config.userInput.bookTitle = resolvedBookTitle;
-    if (manifest.bookTitle !== resolvedBookTitle) {
-      manifest.bookTitle = resolvedBookTitle;
-      await saveManifest(paths.manifestPath, manifest);
+
+    if (args.retitleProjectIdFromOutline) {
+      const desiredProjectId = `${projectTimestampPrefix(projectId)}_${slugify(resolvedBookTitle) || "untitled-book"}`;
+      const finalProjectId = await nextAvailableProjectId(artifactsRoot, desiredProjectId, projectId);
+      if (finalProjectId !== projectId) {
+        await rename(paths.projectDir, getProjectPaths(artifactsRoot, finalProjectId).projectDir);
+        projectId = finalProjectId;
+        paths = getProjectPaths(artifactsRoot, projectId);
+      }
     }
+
+    manifest.projectId = projectId;
+    manifest.bookTitle = resolvedBookTitle;
+    await saveConfigAsYaml(paths.projectYamlPath, config);
+    await writeJsonAtomic(paths.inputPath, config.userInput);
+    await saveManifest(paths.manifestPath, manifest);
   }
 
   const blocks = await runStageBlocks({
@@ -749,9 +848,11 @@ export async function runPipeline(args: RunPipelineArgs): Promise<void> {
 
   await exportProjectEpub({
     artifactsRoot,
-    projectId: args.projectId,
+    projectId,
     ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
   });
+
+  return projectId;
 }
 
 async function readProjectConfig(configPath: string): Promise<AppConfig> {
@@ -762,12 +863,21 @@ async function readProjectConfig(configPath: string): Promise<AppConfig> {
 
 export async function resumeProject(args: {
   artifactsRoot: string;
-  projectId: string;
+  projectId?: string;
   deps?: PipelineDeps;
   progressReporter?: PipelineProgressReporter;
   modelOverride?: string;
-}): Promise<void> {
-  await runPipeline(args);
+}): Promise<string> {
+  const resolvedProjectId = args.projectId ?? (await findMostRecentIncompleteProjectId(args.artifactsRoot));
+  if (!resolvedProjectId) {
+    throw new Error("No incomplete projects found. Pass --project-id to resume a specific project.");
+  }
+
+  await runPipeline({
+    ...args,
+    projectId: resolvedProjectId,
+  });
+  return resolvedProjectId;
 }
 
 function setPending(manifest: ProjectManifest, id: string): void {
@@ -977,6 +1087,50 @@ export async function listProjects(artifactsRoot: string): Promise<string[]> {
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b));
+}
+
+function isIncompleteProject(manifest: ProjectManifest): boolean {
+  const checkpoints = Object.values(manifest.checkpoints);
+  if (checkpoints.length === 0) {
+    return true;
+  }
+  return checkpoints.some((checkpoint) => checkpoint.status !== "complete");
+}
+
+export async function findMostRecentIncompleteProjectId(artifactsRoot: string): Promise<string | null> {
+  const root = normalizeArtifactsRoot(artifactsRoot);
+  const projectIds = await listProjects(root);
+
+  const candidates = await Promise.all(
+    projectIds.map(async (projectId) => {
+      const paths = getProjectPaths(root, projectId);
+      try {
+        const manifest = await loadManifest(paths.manifestPath);
+        if (!isIncompleteProject(manifest)) {
+          return null;
+        }
+
+        const updatedAtMs = Date.parse(manifest.updatedAt);
+        return {
+          projectId,
+          updatedAtMs: Number.isFinite(updatedAtMs) ? updatedAtMs : Number.NEGATIVE_INFINITY,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  const mostRecent = candidates
+    .filter((candidate): candidate is { projectId: string; updatedAtMs: number } => candidate !== null)
+    .sort((a, b) => {
+      if (b.updatedAtMs !== a.updatedAtMs) {
+        return b.updatedAtMs - a.updatedAtMs;
+      }
+      return b.projectId.localeCompare(a.projectId);
+    })[0];
+
+  return mostRecent?.projectId ?? null;
 }
 
 export function buildDefaultRetryPolicy(): RetryPolicy {

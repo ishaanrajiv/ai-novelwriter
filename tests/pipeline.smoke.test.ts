@@ -174,6 +174,7 @@ describe("pipeline smoke", () => {
     const manifestSource = await readFile(path.join(result.projectDir, "manifest.json"), "utf-8");
     const manifest = JSON.parse(manifestSource) as { bookTitle?: string };
 
+    expect(result.projectId.endsWith("_auto-generated-smoke-title")).toBe(true);
     expect(manifest.bookTitle).toBe("Auto Generated Smoke Title");
   });
 
@@ -197,6 +198,54 @@ describe("pipeline smoke", () => {
     });
 
     await access(path.join(root, projectId, "stage3-chapters", "ch-002", "chapter.active.md"));
+  });
+
+  test("resume without project-id picks latest incomplete project", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "novel-resume-auto-"));
+    const config = makeConfig(root);
+    const olderIncompleteId = "2026-03-05_22-20-00_resume-older";
+    const newerIncompleteId = "2026-03-05_22-21-00_resume-newer";
+
+    await expect(
+      createAndRunProject({
+        config,
+        projectId: olderIncompleteId,
+        deps: { llmClient: new MockLLMClient(config.userInput.chapterCount, "blocks:2") },
+      }),
+    ).rejects.toThrow("Injected failure");
+
+    await expect(
+      createAndRunProject({
+        config,
+        projectId: newerIncompleteId,
+        deps: { llmClient: new MockLLMClient(config.userInput.chapterCount, "blocks:2") },
+      }),
+    ).rejects.toThrow("Injected failure");
+
+    const resumedId = await resumeProject({
+      artifactsRoot: root,
+      deps: { llmClient: new MockLLMClient(config.userInput.chapterCount) },
+    });
+
+    expect(resumedId).toBe(newerIncompleteId);
+    await access(path.join(root, newerIncompleteId, "stage3-chapters", "ch-002", "chapter.active.md"));
+  });
+
+  test("resume without project-id fails when all projects are complete", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "novel-resume-none-"));
+    const config = makeConfig(root);
+
+    await createAndRunProject({
+      config,
+      deps: { llmClient: new MockLLMClient(config.userInput.chapterCount) },
+    });
+
+    await expect(
+      resumeProject({
+        artifactsRoot: root,
+        deps: { llmClient: new MockLLMClient(config.userInput.chapterCount) },
+      }),
+    ).rejects.toThrow("No incomplete projects found");
   });
 
   test("regen block creates a new attempt version", async () => {
