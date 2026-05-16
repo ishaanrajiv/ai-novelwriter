@@ -125,6 +125,28 @@ function asNumber(value: unknown): number | null {
   return null;
 }
 
+function parseJsonFromText(input: string): unknown {
+  const trimmed = input.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Try fenced code block first.
+    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenced?.[1]) {
+      return JSON.parse(fenced[1]);
+    }
+
+    // Fallback: take the first plausible JSON object span.
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const slice = trimmed.slice(firstBrace, lastBrace + 1);
+      return JSON.parse(slice);
+    }
+    throw new Error("No JSON object found in model output.");
+  }
+}
+
 function normalizeOutlineCandidate(raw: unknown, chapterCount: number, targetWordCount: number): z.infer<typeof OutlineResultSchema> {
   const obj = asObject(raw);
   if (!obj) return OutlineResultSchema.parse(raw);
@@ -398,7 +420,8 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   const outlineCheckpoint = checkpointIdForStage("chapter_outline");
   let outline;
   if (!args.force?.outline && getCheckpointStatus(manifest, outlineCheckpoint) === "complete") {
-    outline = OutlineResultSchema.parse(await readJsonFile(path.join(paths.outlineDir, "active.json")));
+    const cachedOutline = await readJsonFile<unknown>(path.join(paths.outlineDir, "active.json"));
+    outline = normalizeOutlineCandidate(cachedOutline, config.userInput.chapterCount, config.userInput.targetWordCount);
   } else {
     const system = buildSystemPrompt(config.userInput.systemPromptTemplate);
     const model = resolveModel(config, "outline", args.modelOverride);
@@ -406,7 +429,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
     const outlineText = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateText({ stage: "chapter_outline", model, system, prompt: outlinePrompt }));
     let parsedOutline: unknown;
     try {
-      parsedOutline = JSON.parse(outlineText.text);
+      parsedOutline = parseJsonFromText(outlineText.text);
     } catch (error) {
       throw new Error(`Failed to parse chapter_outline JSON: ${(error as Error).message}`);
     }
