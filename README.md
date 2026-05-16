@@ -33,6 +33,7 @@ export OPENROUTER_API_KEY="your-key"
 export OPENROUTER_HTTP_REFERER="https://your-app.example"
 export OPENROUTER_APP_NAME="AI Novel Writer"
 export OPENROUTER_SESSION_ID="novelwriter-session-001"
+export NOVELWRITER_OPENROUTER_TIMEOUT_MS="120000" # optional, default 120s
 ```
 
 ## Environment
@@ -42,6 +43,9 @@ export OPENROUTER_SESSION_ID="novelwriter-session-001"
 - OpenRouter session grouping:
   - By default, session ID is auto-generated per project as `book-<projectId>`.
   - Optional override: set `OPENROUTER_SESSION_ID` to force a custom session ID.
+- OpenRouter request timeout:
+  - Default is `120s` (`120000ms`).
+  - Optional override: set `NOVELWRITER_OPENROUTER_TIMEOUT_MS`.
 
 ## Running
 
