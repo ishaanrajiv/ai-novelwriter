@@ -23,7 +23,7 @@ describe("manifest", () => {
           openrouter: { apiKeyEnv: "OPENROUTER_API_KEY", httpRefererEnv: "OPENROUTER_HTTP_REFERER", appNameEnv: "OPENROUTER_APP_NAME" },
         },
         systemPromptTemplate: { tone: "Warm", pov: "Third", tense: "Past", style: "Lyrical", constraints: "Consistency", custom: "" },
-        modelConfig: { defaultModel: "qwen/qwen3-8b" },
+        modelConfig: { defaultModel: "google/gemma-4-e4b" },
         iterationPolicy: { minPassesPerStage: 1, convergenceWindow: 2, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
         blockPolicy: { minBlocksPerChapter: 2, maxBlocksPerChapter: 4 },
         retryPolicy: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5000, jitterRatio: 0.1 },

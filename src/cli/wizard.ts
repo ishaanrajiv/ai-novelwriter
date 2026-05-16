@@ -39,7 +39,7 @@ export async function runInteractiveWizard(artifactsRoot: string, options: Wizar
     const targetWordCount = toInt(await ask(rl, "Target word count", "80000"), 80000);
 
     const providerType = await ask(rl, "Provider (lmstudio|openrouter)", "lmstudio");
-    const defaultModel = await ask(rl, "Default model id", "qwen/qwen3-8b");
+    const defaultModel = await ask(rl, "Default model id", "google/gemma-4-e4b");
     const outlineModel = options.askAdvancedArgs ? await ask(rl, "Outline model override (optional)", "") : "";
     const blocksModel = options.askAdvancedArgs ? await ask(rl, "Blocks model override (optional)", "") : "";
     const chapterModel = options.askAdvancedArgs ? await ask(rl, "Chapter model override (optional)", "") : "";

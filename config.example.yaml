@@ -22,7 +22,7 @@ userInput:
     constraints: "Maintain continuity, avoid repetition, preserve character voice"
     custom: "Use vivid sensory details and meaningful dialogue"
   modelConfig:
-    defaultModel: "qwen/qwen3-8b"
+    defaultModel: "google/gemma-4-e4b"
   iterationPolicy:
     minPassesPerStage: 1
     convergenceWindow: 2

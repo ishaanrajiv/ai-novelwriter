@@ -1,7 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
@@ -35,23 +34,16 @@ export interface LLMClient {
 }
 
 function extractUsage(inputValue: unknown): LLMUsage | undefined {
-  if (!inputValue || typeof inputValue !== "object") {
-    return undefined;
-  }
-
+  if (!inputValue || typeof inputValue !== "object") return undefined;
   const usage = inputValue as { inputTokens?: number; outputTokens?: number; totalTokens?: number };
-  if (!usage.inputTokens && !usage.outputTokens && !usage.totalTokens) {
-    return undefined;
-  }
-
   const normalized: LLMUsage = {};
   if (typeof usage.inputTokens === "number") normalized.inputTokens = usage.inputTokens;
   if (typeof usage.outputTokens === "number") normalized.outputTokens = usage.outputTokens;
   if (typeof usage.totalTokens === "number") normalized.totalTokens = usage.totalTokens;
-  return normalized;
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-function makeClient(modelResolver: (model: string) => unknown): LLMClient {
+function makeOpenRouterClient(modelResolver: (model: string) => unknown): LLMClient {
   return {
     async generateJson<T>(options: JsonGenerationOptions<T>): Promise<{ object: T; usage?: LLMUsage }> {
       const result = await generateObject({
@@ -90,19 +82,134 @@ export function createOpenRouterLLMClient(provider: ProviderConfig["openrouter"]
     },
   });
 
-  return makeClient((model) => openRouter(model));
+  return makeOpenRouterClient((model) => openRouter(model));
+}
+
+interface LmStudioChatChoice {
+  message?: { content?: string };
+}
+
+interface LmStudioChatResponse {
+  choices?: LmStudioChatChoice[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+}
+
+function optionalApiKey(value: string | undefined): { apiKey?: string } {
+  return value ? { apiKey: value } : {};
+}
+
+function lmUsageToCommon(usage?: LmStudioChatResponse["usage"]): LLMUsage | undefined {
+  if (!usage) return undefined;
+  const normalized: LLMUsage = {};
+  if (typeof usage.prompt_tokens === "number") normalized.inputTokens = usage.prompt_tokens;
+  if (typeof usage.completion_tokens === "number") normalized.outputTokens = usage.completion_tokens;
+  if (typeof usage.total_tokens === "number") normalized.totalTokens = usage.total_tokens;
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+async function lmStudioChatCompletion(args: {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  system: string;
+  prompt: string;
+  stage: string;
+}): Promise<{ text: string; usage?: LLMUsage }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  try {
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      console.error(`[llm] lmstudio:start stage=${args.stage} model=${args.model}`);
+    }
+
+    const response = await fetch(`${args.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(args.apiKey ? { Authorization: `Bearer ${args.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: args.model,
+        messages: [
+          { role: "system", content: args.system },
+          { role: "user", content: args.prompt },
+        ],
+        temperature: 0.7,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`LM Studio HTTP ${response.status}: ${body.slice(0, 500)}`);
+    }
+
+    const data = (await response.json()) as LmStudioChatResponse;
+    const text = data.choices?.[0]?.message?.content?.trim();
+    if (!text) {
+      throw new Error("LM Studio returned empty completion content");
+    }
+
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      console.error(`[llm] lmstudio:done stage=${args.stage} model=${args.model}`);
+    }
+
+    const usage = lmUsageToCommon(data.usage);
+    return { text, ...(usage ? { usage } : {}) };
+  } catch (error) {
+    if ((error as { name?: string }).name === "AbortError") {
+      throw new Error(`LM Studio request timed out after 120000ms (stage=${args.stage}, model=${args.model})`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function createLmStudioLLMClient(provider: ProviderConfig["lmstudio"]): LLMClient {
-  const apiKey = process.env[provider.apiKeyEnv] ?? "lm-studio";
-  const openai = createOpenAI({
-    apiKey,
-    baseURL: provider.baseUrl,
-  });
+  const apiKey = process.env[provider.apiKeyEnv];
 
-  // LM Studio's OpenAI-compatible server is most reliable with chat completions.
-  // AI SDK OpenAI provider defaults to Responses API, which can hang/fail on local servers.
-  return makeClient((model) => openai.chat(model));
+  return {
+    async generateText(options: TextGenerationOptions): Promise<{ text: string; usage?: LLMUsage }> {
+      return lmStudioChatCompletion({
+        baseUrl: provider.baseUrl,
+        ...optionalApiKey(apiKey),
+        model: options.model,
+        system: options.system,
+        prompt: options.prompt,
+        stage: options.stage,
+      });
+    },
+
+    async generateJson<T>(options: JsonGenerationOptions<T>): Promise<{ object: T; usage?: LLMUsage }> {
+      const jsonPrompt = [
+        options.prompt,
+        "\n\nReturn valid JSON only. No markdown fences. No explanation.",
+      ].join("\n");
+
+      const result = await lmStudioChatCompletion({
+        baseUrl: provider.baseUrl,
+        ...optionalApiKey(apiKey),
+        model: options.model,
+        system: options.system,
+        prompt: jsonPrompt,
+        stage: options.stage,
+      });
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(result.text);
+      } catch (error) {
+        throw new Error(`Failed to parse JSON from LM Studio for stage ${options.stage}: ${(error as Error).message}`);
+      }
+
+      return {
+        object: options.schema.parse(parsed),
+        ...(result.usage ? { usage: result.usage } : {}),
+      };
+    },
+  };
 }
 
 async function healthCheckLmStudio(baseUrl: string): Promise<boolean> {
@@ -134,23 +241,15 @@ async function askLmStudioFallback(): Promise<"retry" | "switch" | "exit"> {
 }
 
 export async function createLLMClient(providerConfig: ProviderConfig): Promise<LLMClient> {
-  if (providerConfig.type === "openrouter") {
-    return createOpenRouterLLMClient(providerConfig.openrouter);
-  }
+  if (providerConfig.type === "openrouter") return createOpenRouterLLMClient(providerConfig.openrouter);
 
   while (true) {
     const ok = await healthCheckLmStudio(providerConfig.lmstudio.baseUrl);
-    if (ok) {
-      return createLmStudioLLMClient(providerConfig.lmstudio);
-    }
+    if (ok) return createLmStudioLLMClient(providerConfig.lmstudio);
 
     const next = await askLmStudioFallback();
-    if (next === "retry") {
-      continue;
-    }
-    if (next === "switch") {
-      return createOpenRouterLLMClient(providerConfig.openrouter);
-    }
+    if (next === "retry") continue;
+    if (next === "switch") return createOpenRouterLLMClient(providerConfig.openrouter);
     throw new Error("LM Studio unavailable. Exiting by user choice.");
   }
 }

@@ -62,7 +62,7 @@ function makeConfig(artifactsRoot: string): AppConfig {
         openrouter: { apiKeyEnv: "OPENROUTER_API_KEY", httpRefererEnv: "OPENROUTER_HTTP_REFERER", appNameEnv: "OPENROUTER_APP_NAME" },
       },
       systemPromptTemplate: { tone: "Moody", pov: "Third-person limited", tense: "Past", style: "Cinematic", constraints: "Keep continuity", custom: "" },
-      modelConfig: { defaultModel: "qwen/qwen3-8b" },
+      modelConfig: { defaultModel: "google/gemma-4-e4b" },
       iterationPolicy: { minPassesPerStage: 1, convergenceWindow: 1, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
       blockPolicy: { minBlocksPerChapter: 2, maxBlocksPerChapter: 4 },
       retryPolicy: { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
