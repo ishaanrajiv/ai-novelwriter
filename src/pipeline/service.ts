@@ -404,9 +404,9 @@ async function resolveContext(paths: ReturnType<typeof getProjectPaths>, context
   return resolved;
 }
 
-async function plannerRationale(llmClient: LLMClient, system: string, stageId: StageId, pass: number, score: number, delta: number, nextStageId: StageId): Promise<string> {
+async function plannerRationale(llmClient: LLMClient, system: string, model: string, stageId: StageId, pass: number, score: number, delta: number, nextStageId: StageId): Promise<string> {
   const prompt = buildPlannerPrompt({ stageId, pass, score, delta, nextStageId });
-  const result = await llmClient.generateText({ stage: `planner:${stageId}:${pass}`, model: "planner", system, prompt });
+  const result = await llmClient.generateText({ stage: `planner:${stageId}:${pass}`, model, system, prompt });
   return result.text.trim() || `Advance from ${stageId} to ${nextStageId}`;
 }
 
@@ -457,17 +457,37 @@ async function runIterativeTextStage(args: {
       }
     }
     emitProgress(args.progressReporter, step, { done: pass - 1, total: Math.max(pass, 1), state: "in_progress", message: `Running ${args.stageId} pass ${pass}...`, checkpointId: args.checkpointId });
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      await appendEvent(args.paths.projectDir, {
+        ts: new Date().toISOString(),
+        level: "info",
+        event: "stage_pass_start",
+        details: { stageId: args.stageId, pass, checkpointId: args.checkpointId, hasCurrent: Boolean(current) },
+      });
+    }
     setCheckpoint(args.manifest, args.checkpointId, "in_progress", pass);
     await saveManifest(args.paths.manifestPath, args.manifest);
 
     if (!current) {
       const firstPrompt = await args.promptBuilder();
+      if (process.env.NOVELWRITER_DEBUG === "1") {
+        await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_generate_start", details: { stageId: args.stageId, pass, promptChars: firstPrompt.length } });
+      }
       const generated = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:generate:${pass}`, model, system, prompt: firstPrompt }));
       current = generated.text.trim();
+      if (process.env.NOVELWRITER_DEBUG === "1") {
+        await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_generate_done", details: { stageId: args.stageId, pass, outputChars: current.length } });
+      }
     }
     previousEvaluated = current;
 
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_critic_start", details: { stageId: args.stageId, pass, inputChars: current.length } });
+    }
     const critique = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateJson({ stage: `${args.stageId}:critic:${pass}`, model, system, prompt: buildCriticPrompt(args.stageId, current), schema: CRITIC_SCHEMA }));
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_critic_done", details: { stageId: args.stageId, pass, score: critique.object.score } });
+    }
     const prevScore = score;
     score = critique.object.score;
     const delta = Math.max(0, score - prevScore);
@@ -491,11 +511,17 @@ async function runIterativeTextStage(args: {
       return current;
     }
 
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_reviser_start", details: { stageId: args.stageId, pass } });
+    }
     const revised = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:reviser:${pass}`, model, system, prompt: buildReviserPrompt(args.stageId, current, critique.object.notes) }));
     current = revised.text.trim();
+    if (process.env.NOVELWRITER_DEBUG === "1") {
+      await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_reviser_done", details: { stageId: args.stageId, pass, outputChars: current.length } });
+    }
 
     const nextStage = STAGE_IDS[Math.min(STAGE_IDS.indexOf(args.stageId) + 1, STAGE_IDS.length - 1)] as StageId;
-    const rationale = await plannerRationale(args.llmClient, system, args.stageId, pass, score, delta, nextStage);
+    const rationale = await plannerRationale(args.llmClient, system, model, args.stageId, pass, score, delta, nextStage);
     args.manifest.plannerDecisions.push({ stageId: args.stageId, nextStageId: nextStage, rationale, createdAt: new Date().toISOString() });
     await saveManifest(args.paths.manifestPath, args.manifest);
   }
@@ -557,12 +583,17 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   const artifactsRoot = normalizeArtifactsRoot(args.artifactsRoot);
   let projectId = args.projectId;
   let paths = getProjectPaths(artifactsRoot, projectId);
+  const debugLogPath = path.join(paths.projectDir, "logs", "debug.jsonl");
+  if (process.env.NOVELWRITER_DEBUG === "1") {
+    process.env.NOVELWRITER_DEBUG_LOG_PATH = debugLogPath;
+    await appendEvent(paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "debug_enabled", details: { debugLogPath } });
+  }
   const config = await readProjectConfig(paths.projectYamlPath);
   const manifest = await loadManifest(paths.manifestPath);
   await ensureProviderEnv(config.userInput.provider);
   const baseLLMClient = args.deps?.llmClient ?? (await createLLMClient(
     config.userInput.provider,
-    { sessionId: openRouterSessionIdForProject(projectId) },
+    { sessionId: openRouterSessionIdForProject(projectId), ...(process.env.NOVELWRITER_DEBUG === "1" ? { debugLogPath } : {}) },
   ));
   let llmClient = wrapLLMClientWithProgressActivity({
     llmClient: wrapLLMClientWithUsageLogging({

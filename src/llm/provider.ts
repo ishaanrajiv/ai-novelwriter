@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline/promises";
+import { appendFile } from "node:fs/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
@@ -35,6 +36,7 @@ export interface LLMClient {
 
 interface LLMClientRuntimeOptions {
   sessionId?: string;
+  debugLogPath?: string;
 }
 
 function extractUsage(inputValue: unknown): LLMUsage | undefined {
@@ -47,26 +49,85 @@ function extractUsage(inputValue: unknown): LLMUsage | undefined {
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-function makeOpenRouterClient(modelResolver: (model: string) => unknown): LLMClient {
+function openRouterTimeoutMs(): number {
+  const raw = process.env.NOVELWRITER_OPENROUTER_TIMEOUT_MS;
+  if (!raw) return 120_000;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 120_000;
+  return Math.round(parsed);
+}
+
+function openRouterDebug(message: string): void {
+  if (process.env.NOVELWRITER_DEBUG === "1") console.error(message);
+}
+
+async function appendDebugLog(runtimeOptions: LLMClientRuntimeOptions | undefined, payload: Record<string, unknown>): Promise<void> {
+  if (process.env.NOVELWRITER_DEBUG !== "1") return;
+  const logPath = runtimeOptions?.debugLogPath ?? process.env.NOVELWRITER_DEBUG_LOG_PATH;
+  if (!logPath) return;
+  try {
+    await appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), component: "llm", ...payload })}\n`, "utf-8");
+  } catch {
+    // Best-effort debug logging.
+  }
+}
+
+function makeOpenRouterClient(modelResolver: (model: string) => unknown, runtimeOptions?: LLMClientRuntimeOptions): LLMClient {
   return {
     async generateJson<T>(options: JsonGenerationOptions<T>): Promise<{ object: T; usage?: LLMUsage }> {
-      const result = await generateObject({
-        model: modelResolver(options.model) as never,
-        system: options.system,
-        prompt: options.prompt,
-        schema: options.schema,
-      });
-      const usage = extractUsage(result.usage);
-      return { object: result.object, ...(usage ? { usage } : {}) };
+      const controller = new AbortController();
+      const timeoutMs = openRouterTimeoutMs();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        openRouterDebug(`[llm] openrouter:start stage=${options.stage} model=${options.model} type=json timeoutMs=${timeoutMs}`);
+        await appendDebugLog(runtimeOptions, { event: "openrouter_start", stage: options.stage, model: options.model, type: "json", timeoutMs });
+        const result = await generateObject({
+          model: modelResolver(options.model) as never,
+          system: options.system,
+          prompt: options.prompt,
+          schema: options.schema,
+          abortSignal: controller.signal,
+        });
+        openRouterDebug(`[llm] openrouter:done stage=${options.stage} model=${options.model} type=json`);
+        await appendDebugLog(runtimeOptions, { event: "openrouter_done", stage: options.stage, model: options.model, type: "json" });
+        const usage = extractUsage(result.usage);
+        return { object: result.object, ...(usage ? { usage } : {}) };
+      } catch (error) {
+        await appendDebugLog(runtimeOptions, { event: "openrouter_error", stage: options.stage, model: options.model, type: "json", message: error instanceof Error ? error.message : String(error) });
+        if ((error as { name?: string }).name === "AbortError") {
+          throw new Error(`OpenRouter request timed out after ${timeoutMs}ms (stage=${options.stage}, model=${options.model})`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
     },
     async generateText(options: TextGenerationOptions): Promise<{ text: string; usage?: LLMUsage }> {
-      const result = await generateText({
-        model: modelResolver(options.model) as never,
-        system: options.system,
-        prompt: options.prompt,
-      });
-      const usage = extractUsage(result.usage);
-      return { text: result.text, ...(usage ? { usage } : {}) };
+      const controller = new AbortController();
+      const timeoutMs = openRouterTimeoutMs();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        openRouterDebug(`[llm] openrouter:start stage=${options.stage} model=${options.model} type=text timeoutMs=${timeoutMs}`);
+        await appendDebugLog(runtimeOptions, { event: "openrouter_start", stage: options.stage, model: options.model, type: "text", timeoutMs });
+        const result = await generateText({
+          model: modelResolver(options.model) as never,
+          system: options.system,
+          prompt: options.prompt,
+          abortSignal: controller.signal,
+        });
+        openRouterDebug(`[llm] openrouter:done stage=${options.stage} model=${options.model} type=text`);
+        await appendDebugLog(runtimeOptions, { event: "openrouter_done", stage: options.stage, model: options.model, type: "text" });
+        const usage = extractUsage(result.usage);
+        return { text: result.text, ...(usage ? { usage } : {}) };
+      } catch (error) {
+        await appendDebugLog(runtimeOptions, { event: "openrouter_error", stage: options.stage, model: options.model, type: "text", message: error instanceof Error ? error.message : String(error) });
+        if ((error as { name?: string }).name === "AbortError") {
+          throw new Error(`OpenRouter request timed out after ${timeoutMs}ms (stage=${options.stage}, model=${options.model})`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
     },
   };
 }
@@ -91,7 +152,7 @@ export function createOpenRouterLLMClient(
     ...(sessionId ? { extraBody: { session_id: sessionId } } : {}),
   });
 
-  return makeOpenRouterClient((model) => openRouter(model));
+  return makeOpenRouterClient((model) => openRouter(model), runtimeOptions);
 }
 
 interface LmStudioChatChoice {
