@@ -93,6 +93,7 @@ export async function runInteractiveWizard(artifactsRoot: string, options: Wizar
           apiKeyEnv: "OPENROUTER_API_KEY",
           httpRefererEnv: "OPENROUTER_HTTP_REFERER",
           appNameEnv: "OPENROUTER_APP_NAME",
+          sessionIdEnv: "OPENROUTER_SESSION_ID",
         },
       },
       systemPromptTemplate: { tone, pov, tense, style, constraints, custom },

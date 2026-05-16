@@ -22,6 +22,7 @@ export const ProviderConfigSchema = z.object({
       apiKeyEnv: z.string().min(1).default("OPENROUTER_API_KEY"),
       httpRefererEnv: z.string().min(1).default("OPENROUTER_HTTP_REFERER"),
       appNameEnv: z.string().min(1).default("OPENROUTER_APP_NAME"),
+      sessionIdEnv: z.string().min(1).default("OPENROUTER_SESSION_ID"),
     })
     .default({}),
 });

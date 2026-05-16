@@ -1,6 +1,6 @@
 import { stdout } from "node:process";
 
-import type { PipelineProgressEvent, PipelineProgressReporter, PipelineStepState } from "../pipeline/service.js";
+import type { PipelineLLMActivityEvent, PipelineProgressEvent, PipelineProgressReporter, PipelineStepState } from "../pipeline/service.js";
 
 interface CliProgressOptions {
   stream?: NodeJS.WriteStream;
@@ -47,6 +47,7 @@ class CliProgressRenderer implements PipelineProgressReporter {
   private spinnerIndex = 0;
   private frameHash = "";
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private llmActivity: PipelineLLMActivityEvent = { active: false, inFlight: 0 };
 
   constructor(options?: CliProgressOptions) {
     this.stream = options?.stream ?? stdout;
@@ -70,6 +71,15 @@ class CliProgressRenderer implements PipelineProgressReporter {
 
     this.captureCheckpoint(event);
     this.render(event);
+  }
+
+  onLLMActivity(event: PipelineLLMActivityEvent): void {
+    this.llmActivity = event;
+    if (!this.isTTY) {
+      return;
+    }
+    this.renderTTY();
+    this.syncAnimation();
   }
 
   private ensureStepSlots(stepCount: number): void {
@@ -121,7 +131,8 @@ class CliProgressRenderer implements PipelineProgressReporter {
 
   private syncAnimation(): void {
     const hasRunningStep = [...this.steps.values()].some((step) => step.state === "in_progress");
-    if (hasRunningStep && !this.tickTimer) {
+    const shouldAnimate = hasRunningStep || this.llmActivity.active;
+    if (shouldAnimate && !this.tickTimer) {
       this.tickTimer = setInterval(() => {
         this.spinnerIndex = (this.spinnerIndex + 1) % SPINNER_FRAMES.length;
         this.renderTTY();
@@ -129,7 +140,7 @@ class CliProgressRenderer implements PipelineProgressReporter {
       return;
     }
 
-    if (!hasRunningStep && this.tickTimer) {
+    if (!shouldAnimate && this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
@@ -179,6 +190,11 @@ class CliProgressRenderer implements PipelineProgressReporter {
       for (const checkpoint of this.checkpointLogs) {
         lines.push(`${this.color("-", "2")} ${checkpoint}`);
       }
+    }
+
+    if (this.llmActivity.active) {
+      lines.push("");
+      lines.push(this.renderLLMActivityBar());
     }
 
     return lines;
@@ -245,6 +261,16 @@ class CliProgressRenderer implements PipelineProgressReporter {
       return value;
     }
     return `\u001b[${ansiCode}m${value}\u001b[0m`;
+  }
+
+  private renderLLMActivityBar(): string {
+    const columns = this.stream.columns && this.stream.columns > 0 ? this.stream.columns : 80;
+    const message = this.llmActivity.inFlight > 1
+      ? ` WAITING FOR ACTIVE LLM CALLS (${this.llmActivity.inFlight}) `
+      : " WAITING FOR ACTIVE LLM CALL ";
+    const width = Math.max(message.length, columns);
+    const bar = message.length >= width ? message.slice(0, width) : `${message}${" ".repeat(width - message.length)}`;
+    return `\u001b[44;97m${bar}\u001b[0m`;
   }
 
   private overallRatio(): number {

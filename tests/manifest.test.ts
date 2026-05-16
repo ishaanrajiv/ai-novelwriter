@@ -20,7 +20,12 @@ describe("manifest", () => {
         provider: {
           type: "lmstudio",
           lmstudio: { baseUrl: "http://127.0.0.1:1234/v1", apiKeyEnv: "LMSTUDIO_API_KEY" },
-          openrouter: { apiKeyEnv: "OPENROUTER_API_KEY", httpRefererEnv: "OPENROUTER_HTTP_REFERER", appNameEnv: "OPENROUTER_APP_NAME" },
+          openrouter: {
+            apiKeyEnv: "OPENROUTER_API_KEY",
+            httpRefererEnv: "OPENROUTER_HTTP_REFERER",
+            appNameEnv: "OPENROUTER_APP_NAME",
+            sessionIdEnv: "OPENROUTER_SESSION_ID",
+          },
         },
         systemPromptTemplate: { tone: "Warm", pov: "Third", tense: "Past", style: "Lyrical", constraints: "Consistency", custom: "" },
         modelConfig: { defaultModel: "google/gemma-4-e4b" },

@@ -32,12 +32,16 @@ cp .env.example .env
 export OPENROUTER_API_KEY="your-key"
 export OPENROUTER_HTTP_REFERER="https://your-app.example"
 export OPENROUTER_APP_NAME="AI Novel Writer"
+export OPENROUTER_SESSION_ID="novelwriter-session-001"
 ```
 
 ## Environment
 
 - `provider.type=lmstudio`: no required env vars (optional `LMSTUDIO_API_KEY`)
 - `provider.type=openrouter`: requires `OPENROUTER_API_KEY`
+- OpenRouter session grouping:
+  - By default, session ID is auto-generated per project as `book-<projectId>`.
+  - Optional override: set `OPENROUTER_SESSION_ID` to force a custom session ID.
 
 ## Running
 

@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { saveConfigAsYaml } from "../config/index.js";
 import { ensureProviderEnv } from "../env/bootstrap.js";
-import { createLLMClient, type LLMClient } from "../llm/provider.js";
+import { createLLMClient, type JsonGenerationOptions, type LLMClient, type TextGenerationOptions } from "../llm/provider.js";
 import {
   STAGE_IDS,
   buildBlockDraftPrompt,
@@ -66,12 +66,16 @@ import { withRetry } from "../utils/retry.js";
 export interface PipelineDeps { llmClient?: LLMClient; now?: () => Date }
 export type PipelineStepId = "premise_expansion" | "story_summary" | "chapter_outline" | "chapter_loop" | "global_revision" | "export_epub";
 export type PipelineStepState = "in_progress" | "complete" | "skipped" | "failed";
+export interface PipelineLLMActivityEvent { active: boolean; inFlight: number; stage?: string }
 export interface PipelineProgressEvent {
   stepId: PipelineStepId; stepLabel: string; stepIndex: number; stepCount: number;
   done: number; total: number; state: PipelineStepState; message: string;
   checkpointId?: string; checkpointPath?: string; checkpointUrl?: string;
 }
-export interface PipelineProgressReporter { onProgress(event: PipelineProgressEvent): void }
+export interface PipelineProgressReporter {
+  onProgress(event: PipelineProgressEvent): void;
+  onLLMActivity?(event: PipelineLLMActivityEvent): void;
+}
 
 interface PipelineStepMeta { id: PipelineStepId; label: string; index: number; count: number }
 const PIPELINE_STEPS: Record<PipelineStepId, PipelineStepMeta> = {
@@ -87,6 +91,43 @@ function toFileUrl(filePath: string): string { return pathToFileURL(filePath).to
 function emitProgress(reporter: PipelineProgressReporter | undefined, step: PipelineStepMeta, event: Omit<PipelineProgressEvent, "stepId" | "stepLabel" | "stepIndex" | "stepCount">): void {
   if (!reporter) return;
   reporter.onProgress({ stepId: step.id, stepLabel: step.label, stepIndex: step.index, stepCount: step.count, ...event });
+}
+function wrapLLMClientWithProgressActivity(args: { llmClient: LLMClient; progressReporter?: PipelineProgressReporter }): LLMClient {
+  const { llmClient, progressReporter } = args;
+  let inFlight = 0;
+
+  const notify = (stage?: string): void => {
+    progressReporter?.onLLMActivity?.({ active: inFlight > 0, inFlight, ...(stage ? { stage } : {}) });
+  };
+
+  const start = (stage?: string): void => {
+    inFlight += 1;
+    notify(stage);
+  };
+
+  const finish = (stage?: string): void => {
+    inFlight = Math.max(0, inFlight - 1);
+    notify(stage);
+  };
+
+  return {
+    async generateText(options: TextGenerationOptions) {
+      start(options.stage);
+      try {
+        return await llmClient.generateText(options);
+      } finally {
+        finish(options.stage);
+      }
+    },
+    async generateJson<T>(options: JsonGenerationOptions<T>) {
+      start(options.stage);
+      try {
+        return await llmClient.generateJson<T>(options);
+      } finally {
+        finish(options.stage);
+      }
+    },
+  };
 }
 function toErrorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function normalizeArtifactsRoot(root: string): string { return path.isAbsolute(root) ? root : path.resolve(process.cwd(), root); }
@@ -498,6 +539,10 @@ export async function createAndRunProject(options: RunProjectOptions): Promise<{
   return { projectId: finalProjectId, projectDir: getProjectPaths(artifactsRoot, finalProjectId).projectDir };
 }
 
+function openRouterSessionIdForProject(projectId: string): string {
+  return `book-${projectId}`;
+}
+
 interface RunPipelineArgs {
   artifactsRoot: string;
   projectId: string;
@@ -515,12 +560,18 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   const config = await readProjectConfig(paths.projectYamlPath);
   const manifest = await loadManifest(paths.manifestPath);
   await ensureProviderEnv(config.userInput.provider);
-  const baseLLMClient = args.deps?.llmClient ?? (await createLLMClient(config.userInput.provider));
-  let llmClient = wrapLLMClientWithUsageLogging({
-    llmClient: baseLLMClient,
-    provider: config.userInput.provider.type,
-    requestPath: paths.usageRequestPath,
-    summaryPath: paths.usageSummaryPath,
+  const baseLLMClient = args.deps?.llmClient ?? (await createLLMClient(
+    config.userInput.provider,
+    { sessionId: openRouterSessionIdForProject(projectId) },
+  ));
+  let llmClient = wrapLLMClientWithProgressActivity({
+    llmClient: wrapLLMClientWithUsageLogging({
+      llmClient: baseLLMClient,
+      provider: config.userInput.provider.type,
+      requestPath: paths.usageRequestPath,
+      summaryPath: paths.usageSummaryPath,
+    }),
+    ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
   });
 
   const touchProjectUpdatedAt = async (): Promise<void> => {
@@ -568,11 +619,14 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
         await rename(paths.projectDir, getProjectPaths(artifactsRoot, finalProjectId).projectDir);
         projectId = finalProjectId;
         paths = getProjectPaths(artifactsRoot, projectId);
-        llmClient = wrapLLMClientWithUsageLogging({
-          llmClient: baseLLMClient,
-          provider: config.userInput.provider.type,
-          requestPath: paths.usageRequestPath,
-          summaryPath: paths.usageSummaryPath,
+        llmClient = wrapLLMClientWithProgressActivity({
+          llmClient: wrapLLMClientWithUsageLogging({
+            llmClient: baseLLMClient,
+            provider: config.userInput.provider.type,
+            requestPath: paths.usageRequestPath,
+            summaryPath: paths.usageSummaryPath,
+          }),
+          ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}),
         });
       }
     }
@@ -868,6 +922,8 @@ export interface ResumeProjectInfo {
   bookTitle: string;
   author: string;
   language: string;
+  provider: "lmstudio" | "openrouter";
+  model: string;
   updatedAt: string;
 }
 
@@ -876,6 +932,7 @@ export async function resolveResumeProjectInfo(args: { artifactsRoot: string; pr
   const resolvedProjectId = args.projectId ?? (await findMostRecentIncompleteProjectId(artifactsRoot));
   if (!resolvedProjectId) throw new Error("No incomplete projects found. Pass --project-id to resume a specific project.");
   const paths = getProjectPaths(artifactsRoot, resolvedProjectId);
+  const config = await readProjectConfig(paths.projectYamlPath);
   const manifest = await loadManifest(paths.manifestPath);
   return {
     projectId: manifest.projectId,
@@ -883,6 +940,8 @@ export async function resolveResumeProjectInfo(args: { artifactsRoot: string; pr
     bookTitle: manifest.bookTitle,
     author: manifest.author,
     language: manifest.language,
+    provider: config.userInput.provider.type,
+    model: config.userInput.modelConfig.defaultModel,
     updatedAt: manifest.updatedAt,
   };
 }

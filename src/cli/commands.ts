@@ -75,8 +75,9 @@ export function buildCli(): Command {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
       const resumeInfo = await resolveResumeProjectInfo({ artifactsRoot, ...(options.projectId ? { projectId: options.projectId } : {}) });
+      const effectiveModel = modelOverride ?? resumeInfo.model;
       console.log(`Resuming book: "${resumeInfo.bookTitle}" (${resumeInfo.folderName})`);
-      console.log(`Author: ${resumeInfo.author} | Language: ${resumeInfo.language} | Last updated: ${resumeInfo.updatedAt}`);
+      console.log(`Author: ${resumeInfo.author} | Language: ${resumeInfo.language} | Provider: ${resumeInfo.provider} | Model: ${effectiveModel} | Last updated: ${resumeInfo.updatedAt}`);
       const progressReporter = createCliProgressReporter();
       const projectId = await resumeProject({
         artifactsRoot,

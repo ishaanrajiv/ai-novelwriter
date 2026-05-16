@@ -33,6 +33,10 @@ export interface LLMClient {
   generateText(options: TextGenerationOptions): Promise<{ text: string; usage?: LLMUsage }>;
 }
 
+interface LLMClientRuntimeOptions {
+  sessionId?: string;
+}
+
 function extractUsage(inputValue: unknown): LLMUsage | undefined {
   if (!inputValue || typeof inputValue !== "object") return undefined;
   const usage = inputValue as { inputTokens?: number; outputTokens?: number; totalTokens?: number };
@@ -67,11 +71,15 @@ function makeOpenRouterClient(modelResolver: (model: string) => unknown): LLMCli
   };
 }
 
-export function createOpenRouterLLMClient(provider: ProviderConfig["openrouter"]): LLMClient {
+export function createOpenRouterLLMClient(
+  provider: ProviderConfig["openrouter"],
+  runtimeOptions?: LLMClientRuntimeOptions,
+): LLMClient {
   const apiKey = process.env[provider.apiKeyEnv];
   if (!apiKey) {
     throw new Error(`${provider.apiKeyEnv} is required for OpenRouter`);
   }
+  const sessionId = runtimeOptions?.sessionId?.trim() || process.env[provider.sessionIdEnv]?.trim();
 
   const openRouter = createOpenRouter({
     apiKey,
@@ -80,6 +88,7 @@ export function createOpenRouterLLMClient(provider: ProviderConfig["openrouter"]
       "HTTP-Referer": process.env[provider.httpRefererEnv] ?? "https://localhost/ai-novelwriter",
       "X-Title": process.env[provider.appNameEnv] ?? "AI Novel Writer",
     },
+    ...(sessionId ? { extraBody: { session_id: sessionId } } : {}),
   });
 
   return makeOpenRouterClient((model) => openRouter(model));
@@ -240,8 +249,11 @@ async function askLmStudioFallback(): Promise<"retry" | "switch" | "exit"> {
   }
 }
 
-export async function createLLMClient(providerConfig: ProviderConfig): Promise<LLMClient> {
-  if (providerConfig.type === "openrouter") return createOpenRouterLLMClient(providerConfig.openrouter);
+export async function createLLMClient(
+  providerConfig: ProviderConfig,
+  runtimeOptions?: LLMClientRuntimeOptions,
+): Promise<LLMClient> {
+  if (providerConfig.type === "openrouter") return createOpenRouterLLMClient(providerConfig.openrouter, runtimeOptions);
 
   while (true) {
     const ok = await healthCheckLmStudio(providerConfig.lmstudio.baseUrl);
@@ -249,7 +261,7 @@ export async function createLLMClient(providerConfig: ProviderConfig): Promise<L
 
     const next = await askLmStudioFallback();
     if (next === "retry") continue;
-    if (next === "switch") return createOpenRouterLLMClient(providerConfig.openrouter);
+    if (next === "switch") return createOpenRouterLLMClient(providerConfig.openrouter, runtimeOptions);
     throw new Error("LM Studio unavailable. Exiting by user choice.");
   }
 }
