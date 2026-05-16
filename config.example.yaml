@@ -28,6 +28,8 @@ userInput:
     maxPassesPerStage: 3
     convergenceWindow: 2
     deltaThreshold: 0.02
+    stagnationPassStart: 2
+    stagnationChangeThreshold: 0.015
     manualApprovalMode: false
     qualityFloor: 0.8
   blockPolicy:

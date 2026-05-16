@@ -24,7 +24,7 @@ describe("manifest", () => {
         },
         systemPromptTemplate: { tone: "Warm", pov: "Third", tense: "Past", style: "Lyrical", constraints: "Consistency", custom: "" },
         modelConfig: { defaultModel: "google/gemma-4-e4b" },
-        iterationPolicy: { minPassesPerStage: 1, maxPassesPerStage: 3, convergenceWindow: 2, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
+        iterationPolicy: { minPassesPerStage: 1, maxPassesPerStage: 3, convergenceWindow: 2, deltaThreshold: 0.02, stagnationPassStart: 2, stagnationChangeThreshold: 0.015, manualApprovalMode: false, qualityFloor: 0.8 },
         blockPolicy: { minBlocksPerChapter: 2, maxBlocksPerChapter: 4 },
         retryPolicy: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5000, jitterRatio: 0.1 },
       },

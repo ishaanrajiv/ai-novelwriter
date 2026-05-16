@@ -112,6 +112,39 @@ function hasConverged(deltas: number[], windowSize: number, threshold: number): 
   return avg <= threshold && max <= threshold * 2;
 }
 
+function normalizeForDiff(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function buildCharNgrams(text: string, size = 5): Set<string> {
+  const grams = new Set<string>();
+  if (text.length <= size) {
+    if (text) grams.add(text);
+    return grams;
+  }
+  for (let i = 0; i <= text.length - size; i += 1) {
+    grams.add(text.slice(i, i + size));
+  }
+  return grams;
+}
+
+function textChangeRatio(previous: string, next: string): number {
+  const a = normalizeForDiff(previous);
+  const b = normalizeForDiff(next);
+  if (!a && !b) return 0;
+  if (a === b) return 0;
+  const gramsA = buildCharNgrams(a);
+  const gramsB = buildCharNgrams(b);
+  const unionSize = new Set([...gramsA, ...gramsB]).size;
+  if (unionSize === 0) return 0;
+  let intersectionSize = 0;
+  for (const gram of gramsA) {
+    if (gramsB.has(gram)) intersectionSize += 1;
+  }
+  const similarity = intersectionSize / unionSize;
+  return Math.max(0, 1 - similarity);
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -183,6 +216,72 @@ function normalizeOutlineCandidate(raw: unknown, chapterCount: number, targetWor
   };
 
   return OutlineResultSchema.parse(normalized);
+}
+
+function normalizeStoryBlocksCandidate(
+  raw: unknown,
+  chapterNumber: number,
+  chapterTitle: string,
+  minBlocks: number,
+  maxBlocks: number,
+  chapterTargetWords: number,
+): z.infer<typeof StoryBlocksResultSchema> {
+  const obj = asObject(raw);
+  if (!obj) return StoryBlocksResultSchema.parse(raw);
+
+  const blocksRaw =
+    (Array.isArray(obj.blocks) ? obj.blocks : null)
+    ?? (Array.isArray(obj.scenes) ? obj.scenes : null)
+    ?? (Array.isArray(obj.chapterBlocks) ? obj.chapterBlocks : null)
+    ?? [];
+
+  const desiredCount = Math.min(maxBlocks, Math.max(minBlocks, blocksRaw.length || minBlocks));
+  const perBlockWords = Math.max(120, Math.round(chapterTargetWords / Math.max(1, desiredCount)));
+
+  const normalizedBlocks = blocksRaw.map((blockValue, index) => {
+    const block = asObject(blockValue) ?? {};
+    const eventsValue = block.events ?? block.beats ?? block.keyEvents;
+    const charactersValue = block.characters ?? block.participants;
+    const continuityValue = block.continuityNotes ?? block.continuity ?? block.constraints;
+
+    const toStrings = (value: unknown, fallback?: string): string[] => {
+      if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      if (typeof value === "string" && value.trim()) return [value.trim()];
+      return fallback ? [fallback] : [];
+    };
+
+    return {
+      blockNumber: asNumber(block.blockNumber) ?? asNumber(block.sceneNumber) ?? asNumber(block.number) ?? index + 1,
+      goal:
+        (typeof block.goal === "string" ? block.goal : null)
+        ?? (typeof block.objective === "string" ? block.objective : null)
+        ?? (typeof block.summary === "string" ? block.summary : null)
+        ?? `Advance chapter conflict in block ${index + 1}.`,
+      events: toStrings(eventsValue, "Escalate chapter tension."),
+      characters: toStrings(charactersValue),
+      continuityNotes: toStrings(continuityValue),
+      targetWordsGuideline:
+        asNumber(block.targetWordsGuideline)
+        ?? asNumber(block.targetWords)
+        ?? asNumber(block.wordTarget)
+        ?? asNumber(block.target_words)
+        ?? perBlockWords,
+    };
+  });
+
+  const normalized = {
+    chapterNumber:
+      asNumber(obj.chapterNumber)
+      ?? asNumber(obj.chapter)
+      ?? chapterNumber,
+    chapterTitle:
+      (typeof obj.chapterTitle === "string" ? obj.chapterTitle : null)
+      ?? (typeof obj.title === "string" ? obj.title : null)
+      ?? chapterTitle,
+    blocks: normalizedBlocks,
+  };
+
+  return StoryBlocksResultSchema.parse(normalized);
 }
 
 function formatRollingSummary(summary: z.infer<typeof RollingSummarySchema> | null): string {
@@ -294,12 +393,28 @@ async function runIterativeTextStage(args: {
   const deltas: number[] = [];
   let pass = 0;
   let current = "";
+  let previousEvaluated = "";
   let score = 0;
   const system = buildSystemPrompt(args.config.userInput.systemPromptTemplate);
   const model = resolveModel(args.config, "memory", args.modelOverride);
 
   while (true) {
     pass += 1;
+    const minPassesMetForStagnation = pass >= args.config.userInput.iterationPolicy.minPassesPerStage;
+    const stagnationWindowStarted = pass >= args.config.userInput.iterationPolicy.stagnationPassStart;
+    if (previousEvaluated && minPassesMetForStagnation && stagnationWindowStarted) {
+      const changeRatio = textChangeRatio(previousEvaluated, current);
+      if (changeRatio <= args.config.userInput.iterationPolicy.stagnationChangeThreshold) {
+        const stored = await createStageTextAttemptFile(args.stageDir, current);
+        args.manifest.stageRuns[args.stageId] = args.manifest.stageRuns[args.stageId] ?? { stageId: args.stageId, passes: [] };
+        args.manifest.stageRuns[args.stageId]?.passes.push({ pass, artifactPath: stored.activePath, score, delta: 0, notes: `Early stop: text change ratio ${changeRatio.toFixed(4)} <= threshold ${args.config.userInput.iterationPolicy.stagnationChangeThreshold.toFixed(4)}.`, createdAt: new Date().toISOString() });
+        args.manifest.activePassPointers[args.stageId] = pass;
+        setCheckpoint(args.manifest, args.checkpointId, "complete", pass);
+        await saveManifest(args.paths.manifestPath, args.manifest);
+        emitProgress(args.progressReporter, step, { done: pass, total: pass, state: "complete", message: `${args.stageId} stopped at pass ${pass}: negligible text change.`, checkpointId: args.checkpointId, checkpointPath: stored.activePath, checkpointUrl: toFileUrl(stored.activePath) });
+        return current;
+      }
+    }
     emitProgress(args.progressReporter, step, { done: pass - 1, total: Math.max(pass, 1), state: "in_progress", message: `Running ${args.stageId} pass ${pass}...`, checkpointId: args.checkpointId });
     setCheckpoint(args.manifest, args.checkpointId, "in_progress", pass);
     await saveManifest(args.paths.manifestPath, args.manifest);
@@ -309,6 +424,7 @@ async function runIterativeTextStage(args: {
       const generated = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:generate:${pass}`, model, system, prompt: firstPrompt }));
       current = generated.text.trim();
     }
+    previousEvaluated = current;
 
     const critique = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateJson({ stage: `${args.stageId}:critic:${pass}`, model, system, prompt: buildCriticPrompt(args.stageId, current), schema: CRITIC_SCHEMA }));
     const prevScore = score;
@@ -484,24 +600,39 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
 
     let pass = 0;
     let current = "";
+    let previousEvaluated = "";
     let score = 0;
     const deltas: number[] = [];
     const system = buildSystemPrompt(config.userInput.systemPromptTemplate);
     const model = resolveModel(config, "chapter", args.modelOverride);
 
-    const blocks = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
+    const blocksPrompt = buildStoryBlocksPrompt({
+      outline,
+      chapterNumber: chapter.chapterNumber,
+      chapterSummary: chapter.summary,
+      minBlocks: config.userInput.blockPolicy.minBlocksPerChapter,
+      maxBlocks: config.userInput.blockPolicy.maxBlocksPerChapter,
+    });
+    const blocksText = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateText({
       stage: `chapter_loop:${chapter.chapterNumber}:blocks`,
       model,
       system,
-      prompt: buildStoryBlocksPrompt({
-        outline,
-        chapterNumber: chapter.chapterNumber,
-        chapterSummary: chapter.summary,
-        minBlocks: config.userInput.blockPolicy.minBlocksPerChapter,
-        maxBlocks: config.userInput.blockPolicy.maxBlocksPerChapter,
-      }),
-      schema: StoryBlocksResultSchema,
+      prompt: blocksPrompt,
     }));
+    let parsedBlocks: unknown;
+    try {
+      parsedBlocks = parseJsonFromText(blocksText.text);
+    } catch (error) {
+      throw new Error(`Failed to parse blocks JSON for chapter ${chapter.chapterNumber}: ${(error as Error).message}`);
+    }
+    const normalizedBlocks = normalizeStoryBlocksCandidate(
+      parsedBlocks,
+      chapter.chapterNumber,
+      chapter.title,
+      config.userInput.blockPolicy.minBlocksPerChapter,
+      config.userInput.blockPolicy.maxBlocksPerChapter,
+      chapter.targetWordsGuideline,
+    );
 
     let rollingSummary = RollingSummarySchema.parse({
       plotState: chapter.summary,
@@ -513,9 +644,26 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
 
     while (true) {
       pass += 1;
+      const minPassesMetForStagnation = pass >= config.userInput.iterationPolicy.minPassesPerStage;
+      const stagnationWindowStarted = pass >= config.userInput.iterationPolicy.stagnationPassStart;
+      if (previousEvaluated && minPassesMetForStagnation && stagnationWindowStarted) {
+        const changeRatio = textChangeRatio(previousEvaluated, current);
+        if (changeRatio <= config.userInput.iterationPolicy.stagnationChangeThreshold) {
+          const markdown = buildChapterMarkdown(chapter.chapterNumber, chapter.title, current);
+          const stored = await createChapterPassFile(paths.chapterDir, chapter.chapterNumber, pass, markdown);
+          manifest.stageRuns[`chapter_loop:${chapter.chapterNumber}`] = manifest.stageRuns[`chapter_loop:${chapter.chapterNumber}`] ?? { stageId: `chapter_loop:${chapter.chapterNumber}`, passes: [] };
+          manifest.stageRuns[`chapter_loop:${chapter.chapterNumber}`]?.passes.push({ pass, artifactPath: stored.activePath, score, delta: 0, notes: `Early stop: text change ratio ${changeRatio.toFixed(4)} <= threshold ${config.userInput.iterationPolicy.stagnationChangeThreshold.toFixed(4)}.`, createdAt: new Date().toISOString() });
+          manifest.activePassPointers[`chapter_loop:${chapter.chapterNumber}`] = pass;
+          setCheckpoint(manifest, chapterCheckpoint, "complete", pass);
+          await saveManifest(paths.manifestPath, manifest);
+          chapterTexts.push(markdown);
+          previousTail = getTailByWords(markdown, config.runtime.tailWindowWords);
+          break;
+        }
+      }
       if (!current) {
         const blockDrafts: string[] = [];
-        for (const block of blocks.object.blocks) {
+        for (const block of normalizedBlocks.blocks) {
           const request = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
             stage: `chapter_loop:${chapter.chapterNumber}:context_request:${pass}:block:${block.blockNumber}`,
             model,
@@ -593,6 +741,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
         }
         current = blockDrafts.join("\n\n");
       }
+      previousEvaluated = current;
 
       const critique = await llmClient.generateJson({ stage: `chapter_loop:${chapter.chapterNumber}:critic:${pass}`, model, system, prompt: buildCriticPrompt("chapter_loop", current), schema: CRITIC_SCHEMA });
       const delta = Math.max(0, critique.object.score - score);
@@ -711,6 +860,31 @@ export async function getProjectStatus(args: { artifactsRoot: string; projectId:
   const counts: Record<CheckpointStatus, number> = { pending: 0, in_progress: 0, complete: 0, failed: 0 };
   for (const checkpoint of Object.values(manifest.checkpoints)) counts[checkpoint.status] += 1;
   return { projectId: manifest.projectId, bookTitle: manifest.bookTitle, createdAt: manifest.createdAt, updatedAt: manifest.updatedAt, checkpointCounts: counts };
+}
+
+export interface ResumeProjectInfo {
+  projectId: string;
+  folderName: string;
+  bookTitle: string;
+  author: string;
+  language: string;
+  updatedAt: string;
+}
+
+export async function resolveResumeProjectInfo(args: { artifactsRoot: string; projectId?: string }): Promise<ResumeProjectInfo> {
+  const artifactsRoot = normalizeArtifactsRoot(args.artifactsRoot);
+  const resolvedProjectId = args.projectId ?? (await findMostRecentIncompleteProjectId(artifactsRoot));
+  if (!resolvedProjectId) throw new Error("No incomplete projects found. Pass --project-id to resume a specific project.");
+  const paths = getProjectPaths(artifactsRoot, resolvedProjectId);
+  const manifest = await loadManifest(paths.manifestPath);
+  return {
+    projectId: manifest.projectId,
+    folderName: path.basename(paths.projectDir),
+    bookTitle: manifest.bookTitle,
+    author: manifest.author,
+    language: manifest.language,
+    updatedAt: manifest.updatedAt,
+  };
 }
 
 export async function listProjects(artifactsRoot: string): Promise<string[]> {

@@ -61,7 +61,7 @@ Global options:
 5. `global_revision`
 6. `export_epub`
 
-Each major stage iterates with generator/critic/reviser passes until convergence policy is met, or `iterationPolicy.maxPassesPerStage` is reached (default `3`).
+Each major stage iterates with generator/critic/reviser passes until convergence policy is met, `iterationPolicy.maxPassesPerStage` is reached (default `3`), or stagnation is detected (`stagnationPassStart`, `stagnationChangeThreshold`) when revisions are nearly unchanged.
 
 ## Artifact Layout
 

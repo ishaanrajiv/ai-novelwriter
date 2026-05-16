@@ -14,6 +14,9 @@ export type StageId = (typeof STAGE_IDS)[number];
 export function buildSystemPrompt(template: SystemPromptTemplate): string {
   return [
     "You are a professional fiction writer and developmental editor.",
+    "Prioritize concrete story construction over abstract theme language.",
+    "Write operational narrative guidance: specific events, choices, consequences, and constraints.",
+    "Avoid vague statements that cannot be directly used to draft scenes and chapters.",
     `Tone: ${template.tone}`,
     `POV: ${template.pov}`,
     `Tense: ${template.tense}`,
@@ -30,7 +33,15 @@ export function buildPremiseExpansionPrompt(input: UserInput): string {
   return [
     `Premise: ${input.premise}`,
     `Target word count: ${input.targetWordCount}`,
-    "Expand this into a detailed creative brief with stakes, core conflict, character goals, and thematic direction.",
+    "Expand this into a chapter-actionable creative brief.",
+    "Output markdown with these exact sections:",
+    "1) Core Story Engine: protagonist goal, antagonist pressure, central dilemma, failure cost.",
+    "2) Character Operating Profiles: for each core character include external goal, internal wound, fear, leverage over others, likely bad decision pattern.",
+    "3) World and Conflict Rules: non-negotiable rules, institutions/factions, constraints that create conflict.",
+    "4) Act-Level Progression: setup, escalation, crisis, climax, resolution with concrete turning points.",
+    "5) Chapter-Seeding Material: 12-25 specific plot beats that can be mapped to chapters.",
+    "6) Continuity Guardrails: forbidden contradictions, tone limits, POV limits, and recurring motifs to maintain.",
+    "Requirements: every bullet must include observable actions or outcomes; avoid abstract-only phrasing.",
   ].join("\n");
 }
 
@@ -40,7 +51,14 @@ export function buildSummaryPrompt(input: UserInput, expandedPremise: string): s
     `Language: ${input.language}`,
     `Chapter count: ${input.chapterCount}`,
     `Expanded premise:\n${expandedPremise}`,
-    "Create a compact story summary from opening to ending, with turning points.",
+    "Create a concrete, chapter-writer-ready story summary from opening to ending.",
+    "Output markdown with these exact sections:",
+    "1) One-Paragraph Spine: protagonist objective, opposition, stakes, irreversible choice at end.",
+    "2) Chronological Beatline: 18-35 numbered beats, each in cause -> action -> consequence form.",
+    "3) Character Arc Tracks: for each core character list start state, pressure points, breaking point, end state.",
+    "4) Escalation Ladder: how conflict intensifies across early/mid/late story with specific reversals.",
+    "5) Endgame Logic: why the final outcome is earned based on prior events.",
+    "Requirements: no poetic/thematic filler; each line must be directly usable for outlining or drafting.",
   ].join("\n\n");
 }
 
@@ -56,6 +74,9 @@ export function buildOutlinePrompt(input: UserInput, storySummary: string): stri
     `Target word count guideline: ${input.targetWordCount}`,
     "Return JSON only (no markdown). Required top-level keys: `bookTitle`, `globalStoryArc`, `chapters`.",
     "Each chapter object must include exactly: `chapterNumber`, `title`, `summary`, `targetWordsGuideline`.",
+    "Each `summary` must be 80-170 words and include: opening situation, chapter objective, 2-4 concrete events, decision/reversal, and ending state that pushes the next chapter.",
+    "Across all chapters, maintain strict cause-and-effect continuity and escalation; no duplicate chapter functions.",
+    "`globalStoryArc` must summarize the progression in concrete milestones, not abstract themes.",
     "Do not use alternate keys like `globalArc`, `arc`, `targetWords`, `wordTarget`, or `target_words`.",
   ].join("\n\n");
 }
@@ -98,7 +119,10 @@ export function buildStoryBlocksPrompt(args: {
     `Chapter ${chapter.chapterNumber}: ${chapter.title}`,
     `Chapter summary: ${args.chapterSummary}`,
     `Block count range: ${args.minBlocks} to ${args.maxBlocks}`,
-    "Return strict JSON story blocks for this chapter with escalating tension and continuity notes.",
+    "Return JSON only (no markdown). Required top-level keys: `chapterNumber`, `chapterTitle`, `blocks`.",
+    "Each block object must include exactly: `blockNumber`, `goal`, `events`, `characters`, `continuityNotes`, `targetWordsGuideline`.",
+    "Do not use alternate keys like `scenes`, `beats`, `targetWords`, or `wordTarget`.",
+    "Design escalating tension and continuity notes across blocks.",
   ].join("\n\n");
 }
 

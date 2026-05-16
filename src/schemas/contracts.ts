@@ -39,6 +39,8 @@ export const IterationPolicySchema = z.object({
   maxPassesPerStage: z.number().int().min(1).default(3),
   convergenceWindow: z.number().int().min(1).default(2),
   deltaThreshold: z.number().min(0).max(1).default(0.02),
+  stagnationPassStart: z.number().int().min(2).default(2),
+  stagnationChangeThreshold: z.number().min(0).max(1).default(0.015),
   manualApprovalMode: z.boolean().default(false),
   qualityFloor: z.number().min(0).max(1).default(0.8),
 }).refine((value) => value.maxPassesPerStage >= value.minPassesPerStage, {

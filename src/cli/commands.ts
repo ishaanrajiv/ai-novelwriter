@@ -8,6 +8,7 @@ import {
   getProjectStatus,
   listProjects,
   regenerateProject,
+  resolveResumeProjectInfo,
   resumeProject,
 } from "../pipeline/service.js";
 import { createCliProgressReporter } from "./progress.js";
@@ -73,11 +74,14 @@ export function buildCli(): Command {
     .action(async (options: { projectId?: string }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
+      const resumeInfo = await resolveResumeProjectInfo({ artifactsRoot, ...(options.projectId ? { projectId: options.projectId } : {}) });
+      console.log(`Resuming book: "${resumeInfo.bookTitle}" (${resumeInfo.folderName})`);
+      console.log(`Author: ${resumeInfo.author} | Language: ${resumeInfo.language} | Last updated: ${resumeInfo.updatedAt}`);
       const progressReporter = createCliProgressReporter();
       const projectId = await resumeProject({
         artifactsRoot,
         progressReporter,
-        ...(options.projectId ? { projectId: options.projectId } : {}),
+        projectId: resumeInfo.projectId,
         ...(modelOverride ? { modelOverride } : {}),
       });
       console.log(`Resumed project: ${projectId}`);
