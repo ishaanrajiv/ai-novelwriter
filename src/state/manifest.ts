@@ -10,9 +10,12 @@ export interface ProjectPaths {
   manifestPath: string;
   inputPath: string;
   projectYamlPath: string;
+  premiseDir: string;
+  summaryDir: string;
   outlineDir: string;
-  blocksDir: string;
   chapterDir: string;
+  globalRevisionDir: string;
+  plannerDir: string;
   exportDir: string;
 }
 
@@ -23,9 +26,12 @@ export function getProjectPaths(artifactsRootAbs: string, projectId: string): Pr
     manifestPath: path.join(projectDir, "manifest.json"),
     inputPath: path.join(projectDir, "inputs", "user-input.json"),
     projectYamlPath: path.join(projectDir, "project.yaml"),
-    outlineDir: path.join(projectDir, "stage1-outline"),
-    blocksDir: path.join(projectDir, "stage2-blocks"),
+    premiseDir: path.join(projectDir, "stage0-premise"),
+    summaryDir: path.join(projectDir, "stage1-summary"),
+    outlineDir: path.join(projectDir, "stage2-outline"),
     chapterDir: path.join(projectDir, "stage3-chapters"),
+    globalRevisionDir: path.join(projectDir, "stage4-global-revision"),
+    plannerDir: path.join(projectDir, "planner"),
     exportDir: path.join(projectDir, "exports", "epub"),
   };
 }
@@ -35,9 +41,12 @@ export async function initProjectDirs(paths: ProjectPaths): Promise<void> {
     ensureDir(paths.projectDir),
     ensureDir(path.dirname(paths.inputPath)),
     ensureDir(path.dirname(paths.projectYamlPath)),
+    ensureDir(paths.premiseDir),
+    ensureDir(paths.summaryDir),
     ensureDir(paths.outlineDir),
-    ensureDir(paths.blocksDir),
     ensureDir(paths.chapterDir),
+    ensureDir(paths.globalRevisionDir),
+    ensureDir(paths.plannerDir),
     ensureDir(paths.exportDir),
     ensureDir(path.join(paths.projectDir, "logs")),
   ]);
@@ -59,147 +68,91 @@ export function buildInitialManifest(args: {
     createdAt: nowIso,
     updatedAt: nowIso,
     checkpoints: {},
-    activePointers: {
-      outlineAttempt: 0,
-      blocksAttempts: {},
-      chapterAttempts: {},
-      blockAttempts: {},
-    },
+    activePointers: { outlineAttempt: 0, blocksAttempts: {}, chapterAttempts: {}, blockAttempts: {} },
+    stageRuns: {},
+    plannerDecisions: [],
+    activePassPointers: {},
     runtime: args.runtime,
   };
 }
 
 export async function loadManifest(manifestPath: string): Promise<ProjectManifest> {
   const parsed = await readJsonFile<ProjectManifest>(manifestPath);
-  return ProjectManifestSchema.parse(parsed);
+  const migrated = {
+    ...parsed,
+    stageRuns: parsed.stageRuns ?? {},
+    plannerDecisions: parsed.plannerDecisions ?? [],
+    activePassPointers: parsed.activePassPointers ?? {},
+  };
+  return ProjectManifestSchema.parse(migrated);
 }
 
 const manifestWriteQueue = new Map<string, Promise<void>>();
 
 export async function saveManifest(manifestPath: string, manifest: ProjectManifest): Promise<void> {
   const previous = manifestWriteQueue.get(manifestPath) ?? Promise.resolve();
-  const next = previous
-    .catch(() => undefined)
-    .then(async () => {
-      manifest.updatedAt = new Date().toISOString();
-      await writeJsonAtomic(manifestPath, manifest);
-    });
+  const next = previous.catch(() => undefined).then(async () => {
+    manifest.updatedAt = new Date().toISOString();
+    await writeJsonAtomic(manifestPath, manifest);
+  });
 
   manifestWriteQueue.set(manifestPath, next);
   try {
     await next;
   } finally {
-    if (manifestWriteQueue.get(manifestPath) === next) {
-      manifestWriteQueue.delete(manifestPath);
-    }
+    if (manifestWriteQueue.get(manifestPath) === next) manifestWriteQueue.delete(manifestPath);
   }
 }
 
-export function checkpointIdForOutline(): string {
-  return "stage1:outline";
-}
-
-export function checkpointIdForBlocks(chapterNumber: number): string {
-  return `stage2:blocks:${chapterKey(chapterNumber)}`;
-}
-
-export function checkpointIdForBlock(chapterNumber: number, blockNumber: number): string {
-  return `stage3:block:${chapterKey(chapterNumber)}:${blockKey(blockNumber)}`;
+export function checkpointIdForStage(stageId: string): string {
+  return `stage:${stageId}`;
 }
 
 export function checkpointIdForChapter(chapterNumber: number): string {
-  return `stage3:chapter:${chapterKey(chapterNumber)}`;
+  return `stage:chapter_loop:${chapterKey(chapterNumber)}`;
 }
 
 export function checkpointIdForExportEpub(): string {
   return "export:epub";
 }
 
-export function setCheckpoint(
-  manifest: ProjectManifest,
-  id: string,
-  status: CheckpointStatus,
-  attempt: number,
-  error?: string,
-): void {
-  manifest.checkpoints[id] = {
-    status,
-    attempt,
-    updatedAt: new Date().toISOString(),
-    error,
-  };
+export function setCheckpoint(manifest: ProjectManifest, id: string, status: CheckpointStatus, attempt: number, error?: string): void {
+  manifest.checkpoints[id] = { status, attempt, updatedAt: new Date().toISOString(), error };
 }
 
 export function getCheckpointStatus(manifest: ProjectManifest, id: string): CheckpointStatus {
   return manifest.checkpoints[id]?.status ?? "pending";
 }
 
-export async function createOutlineAttemptFile(
-  outlineDir: string,
-  content: unknown,
-): Promise<{ attempt: number; attemptPath: string; activePath: string }> {
-  const attempt = await nextAttemptNumber(outlineDir, "attempt", "dash");
-  const attemptFile = `attempt-${String(attempt).padStart(3, "0")}.json`;
-  const attemptPath = path.join(outlineDir, attemptFile);
-  const activePath = path.join(outlineDir, "active.json");
-  await writeJsonAtomic(attemptPath, content);
-  await writeJsonAtomic(activePath, content);
+export async function createStageAttemptFile(stageDir: string, payload: unknown): Promise<{ attempt: number; attemptPath: string; activePath: string }> {
+  const attempt = await nextAttemptNumber(stageDir, "attempt", "dash");
+  const attemptPath = path.join(stageDir, `attempt-${String(attempt).padStart(3, "0")}.json`);
+  const activePath = path.join(stageDir, "active.json");
+  await writeJsonAtomic(attemptPath, payload);
+  await writeJsonAtomic(activePath, payload);
   return { attempt, attemptPath, activePath };
 }
 
-export async function createBlocksAttemptFile(
-  blocksDir: string,
-  chapterNumber: number,
-  content: unknown,
-): Promise<{ attempt: number; attemptPath: string; activePath: string }> {
-  const ck = chapterKey(chapterNumber);
-  const attempt = await nextAttemptNumber(blocksDir, ck);
-  const attemptName = `${ck}.attempt-${String(attempt).padStart(3, "0")}.json`;
-  const activeName = `${ck}.active.json`;
-  const attemptPath = path.join(blocksDir, attemptName);
-  const activePath = path.join(blocksDir, activeName);
-  await writeJsonAtomic(attemptPath, content);
-  await writeJsonAtomic(activePath, content);
+export async function createStageTextAttemptFile(stageDir: string, content: string): Promise<{ attempt: number; attemptPath: string; activePath: string }> {
+  const attempt = await nextAttemptNumber(stageDir, "attempt", "dash");
+  const attemptPath = path.join(stageDir, `attempt-${String(attempt).padStart(3, "0")}.md`);
+  const activePath = path.join(stageDir, "active.md");
+  await writeTextAtomic(attemptPath, content);
+  await writeTextAtomic(activePath, content);
   return { attempt, attemptPath, activePath };
 }
 
-export async function createChapterBlockAttemptFile(
-  chapterRootDir: string,
-  chapterNumber: number,
-  blockNumber: number,
-  content: unknown,
-): Promise<{ attempt: number; attemptPath: string; activePath: string; chapterDir: string }> {
+export async function createChapterPassFile(chapterRootDir: string, chapterNumber: number, pass: number, chapterMarkdown: string): Promise<{ activePath: string; passPath: string }> {
   const chDir = path.join(chapterRootDir, chapterKey(chapterNumber));
-  await ensureDir(chDir);
-
-  const bk = blockKey(blockNumber);
-  const attempt = await nextAttemptNumber(chDir, bk);
-  const attemptName = `${bk}.attempt-${String(attempt).padStart(3, "0")}.json`;
-  const activeName = `${bk}.active.json`;
-  const attemptPath = path.join(chDir, attemptName);
-  const activePath = path.join(chDir, activeName);
-
-  await writeJsonAtomic(attemptPath, content);
-  await writeJsonAtomic(activePath, content);
-
-  return { attempt, attemptPath, activePath, chapterDir: chDir };
-}
-
-export async function createChapterAttemptFile(
-  chapterRootDir: string,
-  chapterNumber: number,
-  chapterMarkdown: string,
-): Promise<{ attempt: number; attemptPath: string; activePath: string; chapterDir: string }> {
-  const chDir = path.join(chapterRootDir, chapterKey(chapterNumber));
-  await ensureDir(chDir);
-  const attempt = await nextAttemptNumber(chDir, "chapter");
-  const attemptName = `chapter.attempt-${String(attempt).padStart(3, "0")}.md`;
-  const activeName = "chapter.active.md";
-  const attemptPath = path.join(chDir, attemptName);
-  const activePath = path.join(chDir, activeName);
-
-  await writeTextAtomic(attemptPath, chapterMarkdown);
+  const passesDir = path.join(chDir, "passes");
+  await ensureDir(passesDir);
+  const passPath = path.join(passesDir, `pass-${String(pass).padStart(3, "0")}.md`);
+  const activePath = path.join(chDir, "chapter.active.md");
+  await writeTextAtomic(passPath, chapterMarkdown);
   await writeTextAtomic(activePath, chapterMarkdown);
+  return { activePath, passPath };
+}
 
-  return { attempt, attemptPath, activePath, chapterDir: chDir };
+export function checkpointIdForLegacyBlock(chapterNumber: number, blockNumber: number): string {
+  return `stage3:block:${chapterKey(chapterNumber)}:${blockKey(blockNumber)}`;
 }

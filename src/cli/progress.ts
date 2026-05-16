@@ -26,10 +26,12 @@ const DEFAULT_CHECKPOINT_LIMIT = 6;
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
 
 const FALLBACK_STEP_LABELS = new Map<number, string>([
-  [1, "Outline"],
-  [2, "Story Blocks"],
-  [3, "Chapter Drafts"],
-  [4, "EPUB Export"],
+  [1, "Premise Expansion"],
+  [2, "Story Summary"],
+  [3, "Chapter Outline"],
+  [4, "Chapter Loop"],
+  [5, "Global Revision"],
+  [6, "EPUB Export"],
 ]);
 
 class CliProgressRenderer implements PipelineProgressReporter {

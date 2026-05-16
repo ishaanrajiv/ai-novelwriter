@@ -1,15 +1,19 @@
-import type {
-  OutlineResult,
-  RollingSummary,
-  StoryBlock,
-  StoryBlocksResult,
-  SystemPromptTemplate,
-  UserInput,
-} from "../types/index.js";
+import type { OutlineResult, SystemPromptTemplate, UserInput } from "../types/index.js";
+
+export const STAGE_IDS = [
+  "premise_expansion",
+  "story_summary",
+  "chapter_outline",
+  "chapter_loop",
+  "global_revision",
+  "export_epub",
+] as const;
+
+export type StageId = (typeof STAGE_IDS)[number];
 
 export function buildSystemPrompt(template: SystemPromptTemplate): string {
   return [
-    "You are a professional fiction writer.",
+    "You are a professional fiction writer and developmental editor.",
     `Tone: ${template.tone}`,
     `POV: ${template.pov}`,
     `Tense: ${template.tense}`,
@@ -22,100 +26,110 @@ export function buildSystemPrompt(template: SystemPromptTemplate): string {
     .join("\n");
 }
 
-export function buildOutlinePrompt(input: UserInput): string {
-  const requestedTitle = input.bookTitle.trim();
+export function buildPremiseExpansionPrompt(input: UserInput): string {
+  return [
+    `Premise: ${input.premise}`,
+    `Target word count: ${input.targetWordCount}`,
+    "Expand this into a detailed creative brief with stakes, core conflict, character goals, and thematic direction.",
+  ].join("\n");
+}
 
+export function buildSummaryPrompt(input: UserInput, expandedPremise: string): string {
+  return [
+    `Book title request: ${input.bookTitle || "Auto-generate if empty"}`,
+    `Language: ${input.language}`,
+    `Chapter count: ${input.chapterCount}`,
+    `Expanded premise:\n${expandedPremise}`,
+    "Create a compact story summary from opening to ending, with turning points.",
+  ].join("\n\n");
+}
+
+export function buildOutlinePrompt(input: UserInput, storySummary: string): string {
+  const requestedTitle = input.bookTitle.trim();
   return [
     requestedTitle
       ? `Requested book title (must use exactly): ${requestedTitle}`
       : "Requested book title: (none provided; generate a fitting original title)",
-    `Premise: ${input.premise}`,
+    `Story summary:\n${storySummary}`,
     `Language: ${input.language}`,
     `Chapter count: ${input.chapterCount}`,
     `Target word count guideline: ${input.targetWordCount}`,
     "Return a chapter-by-chapter outline JSON that strictly matches the schema, including `bookTitle`.",
-    "Distribute words as a guideline only, not strict limits.",
-  ].join("\n");
-}
-
-export function buildBlocksPrompt(args: {
-  input: UserInput;
-  outline: OutlineResult;
-  chapterNumber: number;
-}): string {
-  const chapter = args.outline.chapters.find((item) => item.chapterNumber === args.chapterNumber);
-  if (!chapter) {
-    throw new Error(`Missing chapter ${args.chapterNumber} in outline`);
-  }
-
-  return [
-    `Book title: ${args.input.bookTitle}`,
-    `Global story arc: ${args.outline.globalStoryArc}`,
-    `Chapter number: ${chapter.chapterNumber}`,
-    `Chapter title: ${chapter.title}`,
-    `Chapter summary: ${chapter.summary}`,
-    `Block count bounds: ${args.input.blockPolicy.minBlocksPerChapter}-${args.input.blockPolicy.maxBlocksPerChapter}`,
-    "Return JSON with plot blocks that include character/event continuity details.",
-    "Ensure block numbering starts at 1 and is sequential.",
-  ].join("\n");
-}
-
-export function buildChapterBlockPrompt(args: {
-  input: UserInput;
-  outline: OutlineResult;
-  chapterPlan: StoryBlocksResult;
-  block: StoryBlock;
-  previousChapterTail: string;
-  rollingSummary: RollingSummary;
-  isFirstBlock: boolean;
-}): string {
-  const chapter = args.outline.chapters.find((item) => item.chapterNumber === args.chapterPlan.chapterNumber);
-  if (!chapter) {
-    throw new Error(`Missing chapter ${args.chapterPlan.chapterNumber} in outline`);
-  }
-
-  return [
-    `Book title: ${args.input.bookTitle}`,
-    `Global story arc: ${args.outline.globalStoryArc}`,
-    `Chapter ${chapter.chapterNumber}: ${chapter.title}`,
-    `Chapter summary: ${chapter.summary}`,
-    `Current block #${args.block.blockNumber}`,
-    `Block goal: ${args.block.goal}`,
-    `Block events: ${args.block.events.join(" | ")}`,
-    `Block characters: ${args.block.characters.join(" | ") || "None"}`,
-    `Continuity notes: ${args.block.continuityNotes.join(" | ") || "None"}`,
-    `Target words guideline for this block: ${args.block.targetWordsGuideline}`,
-    args.isFirstBlock ? "This is the first block in the chapter." : "Continue seamlessly from prior chapter text.",
-    `Rolling continuity summary:\n${JSON.stringify(args.rollingSummary, null, 2)}`,
-    args.previousChapterTail
-      ? `Recent chapter tail text (for continuity):\n${args.previousChapterTail}`
-      : "No previous chapter tail text yet.",
-    "Return JSON with `text` and `updatedSummary`.",
   ].join("\n\n");
 }
 
-export function buildChapterFinalizeText(blockTexts: string[]): string {
-  return blockTexts.join("\n\n").trim();
+export function buildChapterDraftPrompt(args: {
+  input: UserInput;
+  outline: OutlineResult;
+  chapterNumber: number;
+  chapterSummary: string;
+  previousChapterTail: string;
+}): string {
+  const chapter = args.outline.chapters.find((item) => item.chapterNumber === args.chapterNumber);
+  if (!chapter) throw new Error(`Missing chapter ${args.chapterNumber} in outline`);
+
+  return [
+    `Book title: ${args.outline.bookTitle}`,
+    `Global story arc: ${args.outline.globalStoryArc}`,
+    `Chapter ${chapter.chapterNumber}: ${chapter.title}`,
+    `Chapter summary: ${chapter.summary}`,
+    `Prior draft summary:\n${args.chapterSummary}`,
+    args.previousChapterTail ? `Prior chapter tail:\n${args.previousChapterTail}` : "No prior chapter tail.",
+    `Target words guideline: ${chapter.targetWordsGuideline}`,
+    "Write a full chapter draft in markdown prose with strong scene flow.",
+  ].join("\n\n");
+}
+
+export function buildGlobalRevisionPrompt(args: { outline: OutlineResult; chapters: string[] }): string {
+  return [
+    `Book title: ${args.outline.bookTitle}`,
+    `Global story arc: ${args.outline.globalStoryArc}`,
+    `Chapter count: ${args.chapters.length}`,
+    "Revise the full manuscript for continuity, pacing, character consistency, scene clarity, and style.",
+    "Return full revised manuscript markdown.",
+    args.chapters.map((c, i) => `## Chapter ${i + 1}\n${c}`).join("\n\n"),
+  ].join("\n\n");
+}
+
+export function buildCriticPrompt(stageId: StageId, content: string): string {
+  return [
+    `Stage: ${stageId}`,
+    "Score the content from 0 to 1 on: continuity, pacing, character consistency, scene clarity, style adherence.",
+    "Return strict JSON: { score: number, notes: string }",
+    `Content:\n${content}`,
+  ].join("\n\n");
+}
+
+export function buildReviserPrompt(stageId: StageId, content: string, notes: string): string {
+  return [
+    `Stage: ${stageId}`,
+    `Critic notes:\n${notes}`,
+    "Revise content accordingly while preserving narrative intent.",
+    `Current content:\n${content}`,
+  ].join("\n\n");
+}
+
+export function buildPlannerPrompt(args: {
+  stageId: StageId;
+  pass: number;
+  score: number;
+  delta: number;
+  nextStageId: StageId;
+}): string {
+  return [
+    "You are a stage planner for a novel-generation pipeline.",
+    `Current stage: ${args.stageId}`,
+    `Pass: ${args.pass}`,
+    `Score: ${args.score}`,
+    `Delta: ${args.delta}`,
+    `Recommended next stage: ${args.nextStageId}`,
+    "Return one concise rationale sentence.",
+  ].join("\n");
 }
 
 export function getTailByWords(text: string, wordLimit: number): string {
-  if (!text.trim()) {
-    return "";
-  }
-
+  if (!text.trim()) return "";
   const words = text.trim().split(/\s+/);
-  if (words.length <= wordLimit) {
-    return text;
-  }
-
+  if (words.length <= wordLimit) return text;
   return words.slice(words.length - wordLimit).join(" ");
-}
-
-export function initialRollingSummary(): RollingSummary {
-  return {
-    plotState: "Story start; no chapter content generated yet.",
-    characterState: "No additional state beyond outline.",
-    openLoops: [],
-    styleConstraints: [],
-  };
 }

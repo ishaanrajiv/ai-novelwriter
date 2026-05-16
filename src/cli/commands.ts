@@ -1,6 +1,7 @@
 import { Command } from "commander";
 
 import { loadConfigFromYaml } from "../config/index.js";
+import { ensureProviderEnv } from "../env/bootstrap.js";
 import {
   createAndRunProject,
   exportProjectEpub,
@@ -13,14 +14,9 @@ import { createCliProgressReporter } from "./progress.js";
 import { runInteractiveWizard } from "./wizard.js";
 
 function parseIntOption(value: string | undefined, name: string): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-
+  if (!value) return undefined;
   const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Invalid ${name}: ${value}`);
-  }
+  if (Number.isNaN(parsed)) throw new Error(`Invalid ${name}: ${value}`);
   return parsed;
 }
 
@@ -32,7 +28,8 @@ export function buildCli(): Command {
     .description("CLI-first AI novel writer with resumable generation pipeline")
     .version("0.1.0")
     .option("--artifacts-root <path>", "Global artifacts root", ".artifacts/novels")
-    .option("--model <model>", "Override model for all stages");
+    .option("--model <model>", "Override model for all stages")
+    .option("--provider <provider>", "Override provider: lmstudio|openrouter");
 
   program
     .command("new")
@@ -41,13 +38,12 @@ export function buildCli(): Command {
     .action(async (options: { advanced?: boolean }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
+      const providerOverride = program.opts<{ provider?: string }>().provider;
       const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.advanced) });
+      if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
+      await ensureProviderEnv(config.userInput.provider);
       const progressReporter = createCliProgressReporter();
-      const result = await createAndRunProject({
-        config,
-        progressReporter,
-        ...(modelOverride ? { modelOverride } : {}),
-      });
+      const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
       console.log(`Project created and generated: ${result.projectId}`);
       console.log(`Project directory: ${result.projectDir}`);
     });
@@ -59,15 +55,13 @@ export function buildCli(): Command {
     .action(async (options: { config: string }) => {
       const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
       const modelOverride = program.opts<{ model?: string }>().model;
+      const providerOverride = program.opts<{ provider?: string }>().provider;
       const config = await loadConfigFromYaml(options.config);
       config.runtime.artifactsRoot = artifactsRoot;
+      if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
+      await ensureProviderEnv(config.userInput.provider);
       const progressReporter = createCliProgressReporter();
-
-      const result = await createAndRunProject({
-        config,
-        progressReporter,
-        ...(modelOverride ? { modelOverride } : {}),
-      });
+      const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
       console.log(`Project created and generated: ${result.projectId}`);
       console.log(`Project directory: ${result.projectDir}`);
     });
@@ -121,7 +115,6 @@ export function buildCli(): Command {
     });
 
   const exportCmd = program.command("export").description("Export outputs");
-
   exportCmd
     .command("epub")
     .requiredOption("--project-id <id>", "Project ID")
@@ -133,41 +126,26 @@ export function buildCli(): Command {
         artifactsRoot,
         projectId: options.projectId,
         progressReporter,
-        progressStep: {
-          stepIndex: 1,
-          stepCount: 1,
-          stepLabel: "EPUB Export",
-        },
+        progressStep: { stepIndex: 1, stepCount: 1, stepLabel: "EPUB Export" },
       });
-
       console.log(`EPUB generated: ${epubPath}`);
     });
 
-  program
-    .command("status")
-    .description("Show checkpoint status for a project")
-    .requiredOption("--project-id <id>", "Project ID")
-    .action(async (options: { projectId: string }) => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const status = await getProjectStatus({ artifactsRoot, projectId: options.projectId });
-      console.log(JSON.stringify(status, null, 2));
-    });
+  program.command("status").description("Show checkpoint status for a project").requiredOption("--project-id <id>", "Project ID").action(async (options: { projectId: string }) => {
+    const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+    const status = await getProjectStatus({ artifactsRoot, projectId: options.projectId });
+    console.log(JSON.stringify(status, null, 2));
+  });
 
-  program
-    .command("list")
-    .description("List available project IDs")
-    .action(async () => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const projects = await listProjects(artifactsRoot);
-      if (projects.length === 0) {
-        console.log("No projects found.");
-        return;
-      }
-
-      for (const project of projects) {
-        console.log(project);
-      }
-    });
+  program.command("list").description("List available project IDs").action(async () => {
+    const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+    const projects = await listProjects(artifactsRoot);
+    if (projects.length === 0) {
+      console.log("No projects found.");
+      return;
+    }
+    for (const project of projects) console.log(project);
+  });
 
   return program;
 }

@@ -4,17 +4,12 @@ import path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 
+import type { ProviderConfig } from "../types/index.js";
+
 interface RequiredEnvVar {
   name: string;
   prompt: string;
 }
-
-const REQUIRED_ENV_VARS: RequiredEnvVar[] = [
-  {
-    name: "OPENROUTER_API_KEY",
-    prompt: "Enter OPENROUTER_API_KEY",
-  },
-];
 
 function parseEnvValue(value: string): string {
   const trimmed = value.trim();
@@ -41,41 +36,27 @@ function parseEnvValue(value: string): string {
 
 function parseEnvAssignment(line: string): { key: string; value: string } | null {
   const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#")) {
-    return null;
-  }
+  if (!trimmed || trimmed.startsWith("#")) return null;
 
   const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
 
   const [, key, rawValue] = match;
-  if (!key || rawValue === undefined) {
-    return null;
-  }
+  if (!key || rawValue === undefined) return null;
   return { key, value: parseEnvValue(rawValue) };
 }
 
 function parseEnvFile(content: string): Record<string, string> {
   const values: Record<string, string> = {};
-
   for (const line of content.split(/\r?\n/)) {
     const assignment = parseEnvAssignment(line);
-    if (!assignment) {
-      continue;
-    }
-    values[assignment.key] = assignment.value;
+    if (assignment) values[assignment.key] = assignment.value;
   }
-
   return values;
 }
 
 function serializeEnvValue(value: string): string {
-  if (/^[A-Za-z0-9_./:@-]+$/.test(value)) {
-    return value;
-  }
-
+  if (/^[A-Za-z0-9_./:@-]+$/.test(value)) return value;
   return JSON.stringify(value);
 }
 
@@ -95,14 +76,9 @@ async function mergeIntoEnvFile(filePath: string, updates: Record<string, string
 
   for (const [key, value] of Object.entries(updates)) {
     const lineValue = `${key}=${serializeEnvValue(value)}`;
-    const lineIndex = lines.findIndex((line) => line.match(new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`)));
-
-    if (lineIndex >= 0) {
-      lines[lineIndex] = lineValue;
-      continue;
-    }
-
-    lines.push(lineValue);
+    const idx = lines.findIndex((line) => line.match(new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`)));
+    if (idx >= 0) lines[idx] = lineValue;
+    else lines.push(lineValue);
   }
 
   const nextContent = `${lines.join("\n").replace(/\n*$/, "\n")}`;
@@ -110,41 +86,36 @@ async function mergeIntoEnvFile(filePath: string, updates: Record<string, string
 }
 
 export async function bootstrapEnvironment(envFilePath: string = path.resolve(process.cwd(), ".env")): Promise<void> {
-  if (await fileExists(envFilePath)) {
-    const envFromFile = parseEnvFile(await readFile(envFilePath, "utf8"));
-    for (const [key, value] of Object.entries(envFromFile)) {
-      if (process.env[key] === undefined) {
-        process.env[key] = value;
-      }
-    }
+  if (!(await fileExists(envFilePath))) return;
+  const envFromFile = parseEnvFile(await readFile(envFilePath, "utf8"));
+  for (const [key, value] of Object.entries(envFromFile)) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+export async function ensureProviderEnv(provider: ProviderConfig, envFilePath: string = path.resolve(process.cwd(), ".env")): Promise<void> {
+  const required: RequiredEnvVar[] = [];
+  if (provider.type === "openrouter") {
+    required.push({ name: provider.openrouter.apiKeyEnv, prompt: `Enter ${provider.openrouter.apiKeyEnv}` });
   }
 
-  const missingRequired = REQUIRED_ENV_VARS.filter((item) => {
+  const missing = required.filter((item) => {
     const value = process.env[item.name];
     return !value || !value.trim();
   });
 
-  if (missingRequired.length === 0) {
-    return;
-  }
+  if (missing.length === 0) return;
 
   if (!input.isTTY || !output.isTTY) {
-    throw new Error(
-      `Missing required env var(s): ${missingRequired.map((item) => item.name).join(", ")}. ` +
-        "Set them in your shell or in .env.",
-    );
+    throw new Error(`Missing required env var(s): ${missing.map((item) => item.name).join(", ")}. Set them in your shell or .env.`);
   }
 
   const rl = createInterface({ input, output });
   const updates: Record<string, string> = {};
-
   try {
-    for (const item of missingRequired) {
+    for (const item of missing) {
       const answer = (await rl.question(`${item.prompt}: `)).trim();
-      if (!answer) {
-        throw new Error(`${item.name} is required`);
-      }
-
+      if (!answer) throw new Error(`${item.name} is required`);
       process.env[item.name] = answer;
       updates[item.name] = answer;
     }
@@ -153,7 +124,4 @@ export async function bootstrapEnvironment(envFilePath: string = path.resolve(pr
   }
 
   await mergeIntoEnvFile(envFilePath, updates);
-
-  const envPathLabel = path.relative(process.cwd(), envFilePath) || ".env";
-  console.log(`Saved required environment variable(s) to ${envPathLabel}.`);
 }

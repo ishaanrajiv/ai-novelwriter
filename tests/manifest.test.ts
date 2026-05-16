@@ -4,12 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import {
-  buildInitialManifest,
-  checkpointIdForOutline,
-  createOutlineAttemptFile,
-  setCheckpoint,
-} from "../src/state/manifest.js";
+import { buildInitialManifest, checkpointIdForStage, createStageAttemptFile, setCheckpoint } from "../src/state/manifest.js";
 
 describe("manifest", () => {
   test("supports checkpoint transitions", async () => {
@@ -22,33 +17,27 @@ describe("manifest", () => {
         premise: "Premise",
         chapterCount: 2,
         targetWordCount: 10000,
-        systemPromptTemplate: {
-          tone: "Warm",
-          pov: "Third",
-          tense: "Past",
-          style: "Lyrical",
-          constraints: "Consistency",
-          custom: "",
+        provider: {
+          type: "lmstudio",
+          lmstudio: { baseUrl: "http://127.0.0.1:1234/v1", apiKeyEnv: "LMSTUDIO_API_KEY" },
+          openrouter: { apiKeyEnv: "OPENROUTER_API_KEY", httpRefererEnv: "OPENROUTER_HTTP_REFERER", appNameEnv: "OPENROUTER_APP_NAME" },
         },
-        modelConfig: { defaultModel: "openai/gpt-4.1-mini" },
+        systemPromptTemplate: { tone: "Warm", pov: "Third", tense: "Past", style: "Lyrical", constraints: "Consistency", custom: "" },
+        modelConfig: { defaultModel: "qwen/qwen3-8b" },
+        iterationPolicy: { minPassesPerStage: 1, convergenceWindow: 2, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
         blockPolicy: { minBlocksPerChapter: 2, maxBlocksPerChapter: 4 },
         retryPolicy: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5000, jitterRatio: 0.1 },
       },
-      runtime: {
-        artifactsRoot: ".artifacts/novels",
-        tailWindowWords: 1200,
-      },
+      runtime: { artifactsRoot: ".artifacts/novels", tailWindowWords: 1200 },
     });
 
-    setCheckpoint(manifest, checkpointIdForOutline(), "in_progress", 0);
-    expect(manifest.checkpoints[checkpointIdForOutline()]?.status).toBe("in_progress");
+    const stageCheckpoint = checkpointIdForStage("premise_expansion");
+    setCheckpoint(manifest, stageCheckpoint, "in_progress", 0);
+    expect(manifest.checkpoints[stageCheckpoint]?.status).toBe("in_progress");
 
     const temp = await mkdtemp(path.join(os.tmpdir(), "manifest-attempt-"));
-    const stored = await createOutlineAttemptFile(temp, { hello: "world" });
-    setCheckpoint(manifest, checkpointIdForOutline(), "complete", stored.attempt);
-    expect(manifest.checkpoints[checkpointIdForOutline()]?.attempt).toBe(1);
-
-    const stored2 = await createOutlineAttemptFile(temp, { hello: "again" });
-    expect(stored2.attempt).toBe(2);
+    const stored = await createStageAttemptFile(temp, { hello: "world" });
+    setCheckpoint(manifest, stageCheckpoint, "complete", stored.attempt);
+    expect(manifest.checkpoints[stageCheckpoint]?.attempt).toBe(1);
   });
 });

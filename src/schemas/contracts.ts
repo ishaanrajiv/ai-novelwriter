@@ -9,12 +9,37 @@ export const SystemPromptTemplateSchema = z.object({
   custom: z.string().default(""),
 });
 
+export const ProviderConfigSchema = z.object({
+  type: z.enum(["lmstudio", "openrouter"]).default("lmstudio"),
+  lmstudio: z
+    .object({
+      baseUrl: z.string().url().default("http://127.0.0.1:1234/v1"),
+      apiKeyEnv: z.string().min(1).default("LMSTUDIO_API_KEY"),
+    })
+    .default({}),
+  openrouter: z
+    .object({
+      apiKeyEnv: z.string().min(1).default("OPENROUTER_API_KEY"),
+      httpRefererEnv: z.string().min(1).default("OPENROUTER_HTTP_REFERER"),
+      appNameEnv: z.string().min(1).default("OPENROUTER_APP_NAME"),
+    })
+    .default({}),
+});
+
 export const ModelConfigSchema = z.object({
   defaultModel: z.string().min(1),
   outlineModel: z.string().optional(),
   blocksModel: z.string().optional(),
   chapterModel: z.string().optional(),
   memoryModel: z.string().optional(),
+});
+
+export const IterationPolicySchema = z.object({
+  minPassesPerStage: z.number().int().min(1).default(1),
+  convergenceWindow: z.number().int().min(1).default(2),
+  deltaThreshold: z.number().min(0).max(1).default(0.02),
+  manualApprovalMode: z.boolean().default(false),
+  qualityFloor: z.number().min(0).max(1).default(0.8),
 });
 
 export const BlockPolicySchema = z.object({
@@ -36,9 +61,11 @@ export const UserInputSchema = z.object({
   premise: z.string().min(1),
   chapterCount: z.number().int().min(1),
   targetWordCount: z.number().int().min(1000),
+  provider: ProviderConfigSchema.default({}),
   systemPromptTemplate: SystemPromptTemplateSchema,
   modelConfig: ModelConfigSchema,
-  blockPolicy: BlockPolicySchema,
+  iterationPolicy: IterationPolicySchema.default({}),
+  blockPolicy: BlockPolicySchema.default({}),
   retryPolicy: RetryPolicySchema,
 });
 
@@ -93,6 +120,27 @@ export const ChapterBlockDraftSchema = z.object({
   updatedSummary: RollingSummarySchema,
 });
 
+export const StagePassSchema = z.object({
+  pass: z.number().int().min(1),
+  artifactPath: z.string().min(1),
+  score: z.number().min(0).max(1),
+  delta: z.number().min(0),
+  notes: z.string().default(""),
+  createdAt: z.string().min(1),
+});
+
+export const StageRunSchema = z.object({
+  stageId: z.string().min(1),
+  passes: z.array(StagePassSchema).default([]),
+});
+
+export const PlannerDecisionSchema = z.object({
+  stageId: z.string().min(1),
+  nextStageId: z.string().min(1),
+  rationale: z.string().min(1),
+  createdAt: z.string().min(1),
+});
+
 export const CheckpointStatusSchema = z.enum(["pending", "in_progress", "complete", "failed"]);
 
 export const CheckpointSchema = z.object({
@@ -118,11 +166,16 @@ export const ProjectManifestSchema = z.object({
   updatedAt: z.string().min(1),
   checkpoints: z.record(z.string(), CheckpointSchema).default({}),
   activePointers: ManifestActivePointersSchema.default({}),
+  stageRuns: z.record(z.string(), StageRunSchema).default({}),
+  plannerDecisions: z.array(PlannerDecisionSchema).default([]),
+  activePassPointers: z.record(z.string(), z.number().int().min(0)).default({}),
   runtime: RuntimeConfigSchema,
 });
 
 export type SystemPromptTemplate = z.infer<typeof SystemPromptTemplateSchema>;
+export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
+export type IterationPolicy = z.infer<typeof IterationPolicySchema>;
 export type BlockPolicy = z.infer<typeof BlockPolicySchema>;
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
 export type UserInput = z.infer<typeof UserInputSchema>;
@@ -133,5 +186,8 @@ export type StoryBlock = z.infer<typeof StoryBlockSchema>;
 export type StoryBlocksResult = z.infer<typeof StoryBlocksResultSchema>;
 export type RollingSummary = z.infer<typeof RollingSummarySchema>;
 export type ChapterBlockDraft = z.infer<typeof ChapterBlockDraftSchema>;
+export type StagePass = z.infer<typeof StagePassSchema>;
+export type StageRun = z.infer<typeof StageRunSchema>;
+export type PlannerDecision = z.infer<typeof PlannerDecisionSchema>;
 export type CheckpointStatus = z.infer<typeof CheckpointStatusSchema>;
 export type ProjectManifest = z.infer<typeof ProjectManifestSchema>;
