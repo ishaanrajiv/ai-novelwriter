@@ -21,6 +21,9 @@ export interface ProjectPaths {
   storyBibleStylePath: string;
   globalRevisionDir: string;
   plannerDir: string;
+  usageDir: string;
+  usageRequestPath: string;
+  usageSummaryPath: string;
   exportDir: string;
 }
 
@@ -42,6 +45,9 @@ export function getProjectPaths(artifactsRootAbs: string, projectId: string): Pr
     storyBibleStylePath: path.join(projectDir, "story-bible", "style.json"),
     globalRevisionDir: path.join(projectDir, "stage4-global-revision"),
     plannerDir: path.join(projectDir, "planner"),
+    usageDir: path.join(projectDir, "usage"),
+    usageRequestPath: path.join(projectDir, "usage", "request.json"),
+    usageSummaryPath: path.join(projectDir, "usage", "summary.json"),
     exportDir: path.join(projectDir, "exports", "epub"),
   };
 }
@@ -58,6 +64,7 @@ export async function initProjectDirs(paths: ProjectPaths): Promise<void> {
     ensureDir(paths.storyBibleDir),
     ensureDir(paths.globalRevisionDir),
     ensureDir(paths.plannerDir),
+    ensureDir(paths.usageDir),
     ensureDir(paths.exportDir),
     ensureDir(path.join(paths.projectDir, "logs")),
   ]);

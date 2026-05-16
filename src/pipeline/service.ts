@@ -56,6 +56,7 @@ import {
   saveManifest,
   setCheckpoint,
 } from "../state/manifest.js";
+import { wrapLLMClientWithUsageLogging } from "../state/usage.js";
 import type { CheckpointStatus, RetryPolicy } from "../types/index.js";
 import { ensureDir, readJsonFile, writeJsonAtomic, writeTextAtomic } from "../utils/fs.js";
 import { chapterKey, createProjectId, formatLocalTimestamp, slugify } from "../utils/ids.js";
@@ -376,11 +377,23 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   const config = await readProjectConfig(paths.projectYamlPath);
   const manifest = await loadManifest(paths.manifestPath);
   await ensureProviderEnv(config.userInput.provider);
-  const llmClient = args.deps?.llmClient ?? (await createLLMClient(config.userInput.provider));
+  const baseLLMClient = args.deps?.llmClient ?? (await createLLMClient(config.userInput.provider));
+  let llmClient = wrapLLMClientWithUsageLogging({
+    llmClient: baseLLMClient,
+    provider: config.userInput.provider.type,
+    requestPath: paths.usageRequestPath,
+    summaryPath: paths.usageSummaryPath,
+  });
+
+  const touchProjectUpdatedAt = async (): Promise<void> => {
+    await saveManifest(paths.manifestPath, manifest);
+  };
 
   const premise = await runIterativeTextStage({ stageId: "premise_expansion", stageDir: paths.premiseDir, checkpointId: checkpointIdForStage("premise_expansion"), promptBuilder: () => buildPremiseExpansionPrompt(config.userInput), config, paths, manifest, llmClient, ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}), ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}) });
+  await touchProjectUpdatedAt();
 
   const summary = await runIterativeTextStage({ stageId: "story_summary", stageDir: paths.summaryDir, checkpointId: checkpointIdForStage("story_summary"), promptBuilder: () => buildSummaryPrompt(config.userInput, premise), config, paths, manifest, llmClient, ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}), ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}) });
+  await touchProjectUpdatedAt();
 
   const outlineCheckpoint = checkpointIdForStage("chapter_outline");
   let outline;
@@ -404,6 +417,7 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
     outline = normalizedOutline;
     emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_outline, { done: 1, total: 1, state: "complete", message: "Chapter outline complete.", checkpointId: outlineCheckpoint, checkpointPath: stored.activePath, checkpointUrl: toFileUrl(stored.activePath) });
   }
+  await touchProjectUpdatedAt();
 
   const resolvedBookTitle = outline.bookTitle.trim();
   if (resolvedBookTitle) {
@@ -415,6 +429,12 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
         await rename(paths.projectDir, getProjectPaths(artifactsRoot, finalProjectId).projectDir);
         projectId = finalProjectId;
         paths = getProjectPaths(artifactsRoot, projectId);
+        llmClient = wrapLLMClientWithUsageLogging({
+          llmClient: baseLLMClient,
+          provider: config.userInput.provider.type,
+          requestPath: paths.usageRequestPath,
+          summaryPath: paths.usageSummaryPath,
+        });
       }
     }
     manifest.projectId = projectId;
@@ -581,11 +601,14 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   }
 
   emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_loop, { done: chapterTexts.length, total: outline.chapters.length, state: "complete", message: "Chapter loop complete." });
+  await touchProjectUpdatedAt();
 
   const revisedManuscript = await runIterativeTextStage({ stageId: "global_revision", stageDir: paths.globalRevisionDir, checkpointId: checkpointIdForStage("global_revision"), promptBuilder: () => buildGlobalRevisionPrompt({ outline, chapters: chapterTexts }), config, paths, manifest, llmClient, ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}), ...(args.modelOverride ? { modelOverride: args.modelOverride } : {}) });
+  await touchProjectUpdatedAt();
 
   await writeTextAtomic(path.join(paths.globalRevisionDir, "manuscript.active.md"), revisedManuscript);
   await exportProjectEpub({ artifactsRoot, projectId, ...(args.progressReporter ? { progressReporter: args.progressReporter } : {}) });
+  await touchProjectUpdatedAt();
 
   await appendEvent(paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "pipeline_complete", details: { projectId } });
   return projectId;
