@@ -11,6 +11,62 @@ import type { AppConfig, OutlineResult } from "../src/schemas/contracts.js";
 
 class MockLLMClient implements LLMClient {
   async generateJson<T>(options: { stage: string; model: string; system: string; prompt: string; schema: z.ZodType<T> }): Promise<{ object: T }> {
+    if (options.stage.includes(":critic:")) {
+      return { object: options.schema.parse({ score: 0.9, notes: "Looks solid" }) };
+    }
+
+    if (options.stage.includes(":blocks")) {
+      return {
+        object: options.schema.parse({
+          chapterNumber: 1,
+          chapterTitle: "Chapter Title",
+          blocks: [
+            { blockNumber: 1, goal: "Set conflict", events: ["Event A"], characters: ["Hero"], continuityNotes: ["None"], targetWordsGuideline: 600 },
+            { blockNumber: 2, goal: "Escalate stakes", events: ["Event B"], characters: ["Hero", "Ally"], continuityNotes: ["Carry tension"], targetWordsGuideline: 600 },
+          ],
+        }),
+      };
+    }
+
+    if (options.stage.includes(":context_request:")) {
+      return {
+        object: options.schema.parse({
+          chapterNumber: 1,
+          blockNumber: 1,
+          neededCharacters: ["Hero"],
+          neededEvents: [],
+          neededWorldRules: [],
+          continuityQuestions: [],
+        }),
+      };
+    }
+
+    if (options.stage.includes(":memory_update:")) {
+      return {
+        object: options.schema.parse({
+          plotState: "Plot moved forward",
+          characterState: "Hero under pressure",
+          openLoops: ["Who is watching the town?"],
+          styleConstraints: ["Keep moody tone"],
+        }),
+      };
+    }
+
+    if (options.stage.includes(":story_bible_update:")) {
+      return {
+        object: options.schema.parse({
+          characters: ["Hero: increasingly paranoid but determined."],
+          events: ["A surveillance hint appears in the alley confrontation."],
+          worldRules: ["Reality edits leave subtle sensory artifacts."],
+          styleAnchors: ["Moody tension with restrained exposition."],
+        }),
+      };
+    }
+
+    throw new Error(`Unexpected JSON stage: ${options.stage}`);
+  }
+
+  async generateText(options: { stage: string }): Promise<{ text: string }> {
     if (options.stage === "chapter_outline") {
       const result: OutlineResult = {
         bookTitle: "Auto Generated Smoke Title",
@@ -20,22 +76,16 @@ class MockLLMClient implements LLMClient {
           { chapterNumber: 2, title: "Chapter 2 Title", summary: "Summary for chapter 2", targetWordsGuideline: 1800 },
         ],
       };
-      return { object: options.schema.parse(result) };
+      return { text: JSON.stringify(result) };
     }
-
-    if (options.stage.includes(":critic:")) {
-      return { object: options.schema.parse({ score: 0.9, notes: "Looks solid" }) };
-    }
-
-    throw new Error(`Unexpected JSON stage: ${options.stage}`);
-  }
-
-  async generateText(options: { stage: string }): Promise<{ text: string }> {
     if (options.stage.includes("premise_expansion") || options.stage.includes("story_summary")) {
       return { text: `Generated ${options.stage}` };
     }
     if (options.stage.startsWith("planner:")) {
       return { text: "Advance to next stage." };
+    }
+    if (options.stage.includes(":block_draft:")) {
+      return { text: "Block prose content." };
     }
     if (options.stage.includes("chapter_loop")) {
       return { text: "Chapter prose content." };
@@ -63,7 +113,7 @@ function makeConfig(artifactsRoot: string): AppConfig {
       },
       systemPromptTemplate: { tone: "Moody", pov: "Third-person limited", tense: "Past", style: "Cinematic", constraints: "Keep continuity", custom: "" },
       modelConfig: { defaultModel: "google/gemma-4-e4b" },
-      iterationPolicy: { minPassesPerStage: 1, convergenceWindow: 1, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
+      iterationPolicy: { minPassesPerStage: 1, maxPassesPerStage: 3, convergenceWindow: 1, deltaThreshold: 0.02, manualApprovalMode: false, qualityFloor: 0.8 },
       blockPolicy: { minBlocksPerChapter: 2, maxBlocksPerChapter: 4 },
       retryPolicy: { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
     },

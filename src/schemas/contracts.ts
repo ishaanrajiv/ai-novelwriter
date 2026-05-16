@@ -36,10 +36,14 @@ export const ModelConfigSchema = z.object({
 
 export const IterationPolicySchema = z.object({
   minPassesPerStage: z.number().int().min(1).default(1),
+  maxPassesPerStage: z.number().int().min(1).default(3),
   convergenceWindow: z.number().int().min(1).default(2),
   deltaThreshold: z.number().min(0).max(1).default(0.02),
   manualApprovalMode: z.boolean().default(false),
   qualityFloor: z.number().min(0).max(1).default(0.8),
+}).refine((value) => value.maxPassesPerStage >= value.minPassesPerStage, {
+  message: "maxPassesPerStage must be >= minPassesPerStage",
+  path: ["maxPassesPerStage"],
 });
 
 export const BlockPolicySchema = z.object({
@@ -120,6 +124,30 @@ export const ChapterBlockDraftSchema = z.object({
   updatedSummary: RollingSummarySchema,
 });
 
+export const ContextRequestSchema = z.object({
+  chapterNumber: z.number().int().positive(),
+  blockNumber: z.number().int().positive(),
+  neededCharacters: z.array(z.string().min(1)).default([]),
+  neededEvents: z.array(z.string().min(1)).default([]),
+  neededWorldRules: z.array(z.string().min(1)).default([]),
+  continuityQuestions: z.array(z.string().min(1)).default([]),
+});
+
+export const ResolvedContextSchema = z.object({
+  characterContext: z.array(z.string().min(1)).default([]),
+  eventContext: z.array(z.string().min(1)).default([]),
+  worldContext: z.array(z.string().min(1)).default([]),
+  continuityAnswers: z.array(z.string().min(1)).default([]),
+  carryForwardConstraints: z.array(z.string().min(1)).default([]),
+});
+
+export const StoryBibleStateSchema = z.object({
+  characters: z.array(z.string().min(1)).default([]),
+  events: z.array(z.string().min(1)).default([]),
+  worldRules: z.array(z.string().min(1)).default([]),
+  styleAnchors: z.array(z.string().min(1)).default([]),
+});
+
 export const StagePassSchema = z.object({
   pass: z.number().int().min(1),
   artifactPath: z.string().min(1),
@@ -186,6 +214,9 @@ export type StoryBlock = z.infer<typeof StoryBlockSchema>;
 export type StoryBlocksResult = z.infer<typeof StoryBlocksResultSchema>;
 export type RollingSummary = z.infer<typeof RollingSummarySchema>;
 export type ChapterBlockDraft = z.infer<typeof ChapterBlockDraftSchema>;
+export type ContextRequest = z.infer<typeof ContextRequestSchema>;
+export type ResolvedContext = z.infer<typeof ResolvedContextSchema>;
+export type StoryBibleState = z.infer<typeof StoryBibleStateSchema>;
 export type StagePass = z.infer<typeof StagePassSchema>;
 export type StageRun = z.infer<typeof StageRunSchema>;
 export type PlannerDecision = z.infer<typeof PlannerDecisionSchema>;

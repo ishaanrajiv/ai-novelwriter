@@ -61,6 +61,7 @@ export async function runInteractiveWizard(artifactsRoot: string, options: Wizar
     const custom = options.askAdvancedArgs ? await ask(rl, "Prompt template: custom", "") : "";
 
     const minPassesPerStage = options.askAdvancedArgs ? toInt(await ask(rl, "Iteration min passes per stage", "1"), 1) : 1;
+    const maxPassesPerStage = options.askAdvancedArgs ? toInt(await ask(rl, "Iteration max passes per stage", "3"), 3) : 3;
     const convergenceWindow = options.askAdvancedArgs ? toInt(await ask(rl, "Iteration convergence window", "2"), 2) : 2;
     const deltaThreshold = options.askAdvancedArgs ? toFloat(await ask(rl, "Iteration delta threshold", "0.02"), 0.02) : 0.02;
     const qualityFloor = options.askAdvancedArgs ? toFloat(await ask(rl, "Iteration quality floor", "0.8"), 0.8) : 0.8;
@@ -102,6 +103,7 @@ export async function runInteractiveWizard(artifactsRoot: string, options: Wizar
       },
       iterationPolicy: {
         minPassesPerStage,
+        maxPassesPerStage,
         convergenceWindow,
         deltaThreshold,
         manualApprovalMode: false,

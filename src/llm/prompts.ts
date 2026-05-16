@@ -54,7 +54,9 @@ export function buildOutlinePrompt(input: UserInput, storySummary: string): stri
     `Language: ${input.language}`,
     `Chapter count: ${input.chapterCount}`,
     `Target word count guideline: ${input.targetWordCount}`,
-    "Return a chapter-by-chapter outline JSON that strictly matches the schema, including `bookTitle`.",
+    "Return JSON only (no markdown). Required top-level keys: `bookTitle`, `globalStoryArc`, `chapters`.",
+    "Each chapter object must include exactly: `chapterNumber`, `title`, `summary`, `targetWordsGuideline`.",
+    "Do not use alternate keys like `globalArc`, `arc`, `targetWords`, `wordTarget`, or `target_words`.",
   ].join("\n\n");
 }
 
@@ -77,6 +79,100 @@ export function buildChapterDraftPrompt(args: {
     args.previousChapterTail ? `Prior chapter tail:\n${args.previousChapterTail}` : "No prior chapter tail.",
     `Target words guideline: ${chapter.targetWordsGuideline}`,
     "Write a full chapter draft in markdown prose with strong scene flow.",
+  ].join("\n\n");
+}
+
+export function buildStoryBlocksPrompt(args: {
+  outline: OutlineResult;
+  chapterNumber: number;
+  chapterSummary: string;
+  minBlocks: number;
+  maxBlocks: number;
+}): string {
+  const chapter = args.outline.chapters.find((item) => item.chapterNumber === args.chapterNumber);
+  if (!chapter) throw new Error(`Missing chapter ${args.chapterNumber} in outline`);
+
+  return [
+    `Book title: ${args.outline.bookTitle}`,
+    `Global story arc: ${args.outline.globalStoryArc}`,
+    `Chapter ${chapter.chapterNumber}: ${chapter.title}`,
+    `Chapter summary: ${args.chapterSummary}`,
+    `Block count range: ${args.minBlocks} to ${args.maxBlocks}`,
+    "Return strict JSON story blocks for this chapter with escalating tension and continuity notes.",
+  ].join("\n\n");
+}
+
+export function buildContextRequestPrompt(args: {
+  chapterNumber: number;
+  chapterTitle: string;
+  blockNumber: number;
+  blockGoal: string;
+  blockEvents: string[];
+  rollingSummary: string;
+}): string {
+  return [
+    `Chapter ${args.chapterNumber}: ${args.chapterTitle}`,
+    `Block ${args.blockNumber} goal: ${args.blockGoal}`,
+    `Planned events: ${args.blockEvents.join("; ")}`,
+    `Current rolling summary:\n${args.rollingSummary || "No rolling summary yet."}`,
+    "Return strict JSON context request listing only necessary continuity dependencies.",
+  ].join("\n\n");
+}
+
+export function buildBlockDraftPrompt(args: {
+  outline: OutlineResult;
+  chapterNumber: number;
+  chapterTitle: string;
+  blockNumber: number;
+  blockGoal: string;
+  blockEvents: string[];
+  blockCharacters: string[];
+  targetWordsGuideline: number;
+  previousChapterTail: string;
+  rollingSummary: string;
+  resolvedContext: string;
+}): string {
+  return [
+    `Book title: ${args.outline.bookTitle}`,
+    `Global story arc: ${args.outline.globalStoryArc}`,
+    `Chapter ${args.chapterNumber}: ${args.chapterTitle}`,
+    `Block ${args.blockNumber} goal: ${args.blockGoal}`,
+    `Events to include: ${args.blockEvents.join("; ")}`,
+    `Characters in focus: ${args.blockCharacters.join(", ") || "None specified"}`,
+    `Target words guideline: ${args.targetWordsGuideline}`,
+    `Prior chapter tail:\n${args.previousChapterTail || "No prior chapter tail."}`,
+    `Rolling summary:\n${args.rollingSummary || "No rolling summary yet."}`,
+    `Resolved context:\n${args.resolvedContext || "No additional resolved context."}`,
+    "Write only this story block in markdown prose. Preserve tonal and POV consistency.",
+  ].join("\n\n");
+}
+
+export function buildMemoryUpdatePrompt(args: {
+  chapterNumber: number;
+  blockNumber: number;
+  previousSummary: string;
+  blockText: string;
+}): string {
+  return [
+    `Chapter ${args.chapterNumber}, block ${args.blockNumber}`,
+    `Previous rolling summary:\n${args.previousSummary || "No previous summary."}`,
+    `New block text:\n${args.blockText}`,
+    "Return strict JSON rolling summary update (plotState, characterState, openLoops, styleConstraints).",
+  ].join("\n\n");
+}
+
+export function buildStoryBibleUpdatePrompt(args: {
+  chapterNumber: number;
+  blockNumber: number;
+  blockText: string;
+  currentBible: string;
+}): string {
+  return [
+    `Chapter ${args.chapterNumber}, block ${args.blockNumber}`,
+    `Current story bible state:\n${args.currentBible}`,
+    `New block text:\n${args.blockText}`,
+    "Return strict JSON updated story bible state with keys: characters, events, worldRules, styleAnchors.",
+    "Preserve existing valid entries unless contradicted by the new block.",
   ].join("\n\n");
 }
 

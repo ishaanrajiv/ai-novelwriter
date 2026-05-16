@@ -25,6 +25,7 @@ userInput:
     defaultModel: "google/gemma-4-e4b"
   iterationPolicy:
     minPassesPerStage: 1
+    maxPassesPerStage: 3
     convergenceWindow: 2
     deltaThreshold: 0.02
     manualApprovalMode: false

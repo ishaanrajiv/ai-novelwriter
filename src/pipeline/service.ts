@@ -12,13 +12,17 @@ import { ensureProviderEnv } from "../env/bootstrap.js";
 import { createLLMClient, type LLMClient } from "../llm/provider.js";
 import {
   STAGE_IDS,
-  buildChapterDraftPrompt,
+  buildBlockDraftPrompt,
+  buildContextRequestPrompt,
   buildCriticPrompt,
   buildGlobalRevisionPrompt,
+  buildMemoryUpdatePrompt,
   buildOutlinePrompt,
   buildPlannerPrompt,
   buildPremiseExpansionPrompt,
   buildReviserPrompt,
+  buildStoryBlocksPrompt,
+  buildStoryBibleUpdatePrompt,
   buildSummaryPrompt,
   buildSystemPrompt,
   getTailByWords,
@@ -26,7 +30,17 @@ import {
 } from "../llm/prompts.js";
 import { exportStyledEpub } from "../output/epub.js";
 import { buildChapterMarkdown } from "../output/markdown.js";
-import { AppConfigSchema, OutlineResultSchema, type AppConfig, type ProjectManifest } from "../schemas/contracts.js";
+import {
+  AppConfigSchema,
+  ContextRequestSchema,
+  OutlineResultSchema,
+  ResolvedContextSchema,
+  RollingSummarySchema,
+  StoryBibleStateSchema,
+  StoryBlocksResultSchema,
+  type AppConfig,
+  type ProjectManifest,
+} from "../schemas/contracts.js";
 import {
   buildInitialManifest,
   checkpointIdForChapter,
@@ -90,7 +104,141 @@ const CRITIC_SCHEMA = z.object({ score: z.number().min(0).max(1), notes: z.strin
 function hasConverged(deltas: number[], windowSize: number, threshold: number): boolean {
   if (deltas.length < windowSize) return false;
   const tail = deltas.slice(-windowSize);
-  return tail.every((d) => d <= threshold);
+  // Treat convergence as a mostly-flat tail instead of requiring every delta
+  // to be below threshold. This avoids over-iterating when one pass spikes.
+  const avg = tail.reduce((sum, d) => sum + d, 0) / tail.length;
+  const max = Math.max(...tail);
+  return avg <= threshold && max <= threshold * 2;
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function normalizeOutlineCandidate(raw: unknown, chapterCount: number, targetWordCount: number): z.infer<typeof OutlineResultSchema> {
+  const obj = asObject(raw);
+  if (!obj) return OutlineResultSchema.parse(raw);
+
+  const chaptersRaw = Array.isArray(obj.chapters) ? obj.chapters : [];
+  const perChapterDefault = Math.max(300, Math.round(targetWordCount / Math.max(1, chapterCount)));
+  const normalizedChapters = chaptersRaw.map((chapterValue, index) => {
+    const chapter = asObject(chapterValue) ?? {};
+    const targetWordsGuideline =
+      asNumber(chapter.targetWordsGuideline)
+      ?? asNumber(chapter.targetWords)
+      ?? asNumber(chapter.wordTarget)
+      ?? asNumber(chapter.wordCountTarget)
+      ?? asNumber(chapter.target_words)
+      ?? perChapterDefault;
+
+    return {
+      chapterNumber: asNumber(chapter.chapterNumber) ?? index + 1,
+      title: typeof chapter.title === "string" ? chapter.title : `Chapter ${index + 1}`,
+      summary: typeof chapter.summary === "string" ? chapter.summary : "",
+      targetWordsGuideline,
+    };
+  });
+
+  const normalized = {
+    bookTitle: typeof obj.bookTitle === "string" ? obj.bookTitle : "",
+    globalStoryArc:
+      (typeof obj.globalStoryArc === "string" ? obj.globalStoryArc : null)
+      ?? (typeof obj.globalArc === "string" ? obj.globalArc : null)
+      ?? (typeof obj.storyArc === "string" ? obj.storyArc : null)
+      ?? (typeof obj.arc === "string" ? obj.arc : null)
+      ?? "",
+    chapters: normalizedChapters,
+  };
+
+  return OutlineResultSchema.parse(normalized);
+}
+
+function formatRollingSummary(summary: z.infer<typeof RollingSummarySchema> | null): string {
+  if (!summary) return "";
+  return [
+    `Plot state: ${summary.plotState}`,
+    `Character state: ${summary.characterState}`,
+    `Open loops: ${summary.openLoops.join("; ") || "None"}`,
+    `Style constraints: ${summary.styleConstraints.join("; ") || "None"}`,
+  ].join("\n");
+}
+
+async function seedStoryBible(paths: ReturnType<typeof getProjectPaths>, outline: z.infer<typeof OutlineResultSchema>): Promise<void> {
+  const base = {
+    bookTitle: outline.bookTitle,
+    globalStoryArc: outline.globalStoryArc,
+    chapters: outline.chapters.map((chapter) => ({ chapterNumber: chapter.chapterNumber, title: chapter.title, summary: chapter.summary })),
+  };
+  await writeJsonAtomic(paths.storyBibleCharactersPath, { ...base, characters: [] });
+  await writeJsonAtomic(paths.storyBibleEventsPath, { ...base, events: [] });
+  await writeJsonAtomic(paths.storyBibleWorldPath, { ...base, worldRules: [] });
+  await writeJsonAtomic(paths.storyBibleStylePath, { styleAnchors: [] });
+}
+
+function formatStoryBibleState(storyBible: z.infer<typeof StoryBibleStateSchema>): string {
+  return [
+    `Characters: ${storyBible.characters.join(" | ") || "None"}`,
+    `Events: ${storyBible.events.join(" | ") || "None"}`,
+    `World rules: ${storyBible.worldRules.join(" | ") || "None"}`,
+    `Style anchors: ${storyBible.styleAnchors.join(" | ") || "None"}`,
+  ].join("\n");
+}
+
+async function loadStoryBibleState(paths: ReturnType<typeof getProjectPaths>): Promise<z.infer<typeof StoryBibleStateSchema>> {
+  const [charactersPayload, eventsPayload, worldPayload, stylePayload] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(paths.storyBibleCharactersPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleEventsPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleWorldPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleStylePath),
+  ]);
+  return StoryBibleStateSchema.parse({
+    characters: Array.isArray(charactersPayload.characters) ? charactersPayload.characters : [],
+    events: Array.isArray(eventsPayload.events) ? eventsPayload.events : [],
+    worldRules: Array.isArray(worldPayload.worldRules) ? worldPayload.worldRules : [],
+    styleAnchors: Array.isArray(stylePayload.styleAnchors) ? stylePayload.styleAnchors : [],
+  });
+}
+
+async function saveStoryBibleState(paths: ReturnType<typeof getProjectPaths>, outline: z.infer<typeof OutlineResultSchema>, storyBible: z.infer<typeof StoryBibleStateSchema>): Promise<void> {
+  const base = {
+    bookTitle: outline.bookTitle,
+    globalStoryArc: outline.globalStoryArc,
+    chapters: outline.chapters.map((chapter) => ({ chapterNumber: chapter.chapterNumber, title: chapter.title, summary: chapter.summary })),
+  };
+  await Promise.all([
+    writeJsonAtomic(paths.storyBibleCharactersPath, { ...base, characters: storyBible.characters }),
+    writeJsonAtomic(paths.storyBibleEventsPath, { ...base, events: storyBible.events }),
+    writeJsonAtomic(paths.storyBibleWorldPath, { ...base, worldRules: storyBible.worldRules }),
+    writeJsonAtomic(paths.storyBibleStylePath, { styleAnchors: storyBible.styleAnchors }),
+  ]);
+}
+
+async function resolveContext(paths: ReturnType<typeof getProjectPaths>, contextRequest: z.infer<typeof ContextRequestSchema>): Promise<z.infer<typeof ResolvedContextSchema>> {
+  const [charactersPayload, eventsPayload, worldPayload, stylePayload] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(paths.storyBibleCharactersPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleEventsPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleWorldPath),
+    readJsonFile<Record<string, unknown>>(paths.storyBibleStylePath),
+  ]);
+
+  const toLines = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  const resolved = ResolvedContextSchema.parse({
+    characterContext: toLines(charactersPayload.characters).filter((line) => contextRequest.neededCharacters.length === 0 || contextRequest.neededCharacters.some((name) => line.toLowerCase().includes(name.toLowerCase()))),
+    eventContext: toLines(eventsPayload.events).filter((line) => contextRequest.neededEvents.length === 0 || contextRequest.neededEvents.some((name) => line.toLowerCase().includes(name.toLowerCase()))),
+    worldContext: toLines(worldPayload.worldRules).filter((line) => contextRequest.neededWorldRules.length === 0 || contextRequest.neededWorldRules.some((name) => line.toLowerCase().includes(name.toLowerCase()))),
+    continuityAnswers: contextRequest.continuityQuestions.map((question) => `Pending continuity check: ${question}`),
+    carryForwardConstraints: toLines(stylePayload.styleAnchors),
+  });
+  return resolved;
 }
 
 async function plannerRationale(llmClient: LLMClient, system: string, stageId: StageId, pass: number, score: number, delta: number, nextStageId: StageId): Promise<string> {
@@ -152,12 +300,14 @@ async function runIterativeTextStage(args: {
     await saveManifest(args.paths.manifestPath, args.manifest);
 
     const minPassesMet = pass >= args.config.userInput.iterationPolicy.minPassesPerStage;
+    const maxPassesReached = pass >= args.config.userInput.iterationPolicy.maxPassesPerStage;
     const converged = hasConverged(deltas, args.config.userInput.iterationPolicy.convergenceWindow, args.config.userInput.iterationPolicy.deltaThreshold);
     const qualityMet = score >= args.config.userInput.iterationPolicy.qualityFloor;
-    if (minPassesMet && converged && qualityMet) {
+    if ((minPassesMet && converged && qualityMet) || maxPassesReached) {
       setCheckpoint(args.manifest, args.checkpointId, "complete", pass);
       await saveManifest(args.paths.manifestPath, args.manifest);
-      emitProgress(args.progressReporter, step, { done: pass, total: pass, state: "complete", message: `${args.stageId} converged at pass ${pass}.`, checkpointId: args.checkpointId, checkpointPath: stored.activePath, checkpointUrl: toFileUrl(stored.activePath) });
+      const reason = maxPassesReached && !(minPassesMet && converged && qualityMet) ? "hit max passes" : "converged";
+      emitProgress(args.progressReporter, step, { done: pass, total: pass, state: "complete", message: `${args.stageId} ${reason} at pass ${pass}.`, checkpointId: args.checkpointId, checkpointPath: stored.activePath, checkpointUrl: toFileUrl(stored.activePath) });
       return current;
     }
 
@@ -239,11 +389,19 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
   } else {
     const system = buildSystemPrompt(config.userInput.systemPromptTemplate);
     const model = resolveModel(config, "outline", args.modelOverride);
-    const result = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({ stage: "chapter_outline", model, system, prompt: buildOutlinePrompt(config.userInput, summary), schema: OutlineResultSchema }));
-    const stored = await createStageAttemptFile(paths.outlineDir, result.object);
+    const outlinePrompt = buildOutlinePrompt(config.userInput, summary);
+    const outlineText = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateText({ stage: "chapter_outline", model, system, prompt: outlinePrompt }));
+    let parsedOutline: unknown;
+    try {
+      parsedOutline = JSON.parse(outlineText.text);
+    } catch (error) {
+      throw new Error(`Failed to parse chapter_outline JSON: ${(error as Error).message}`);
+    }
+    const normalizedOutline = normalizeOutlineCandidate(parsedOutline, config.userInput.chapterCount, config.userInput.targetWordCount);
+    const stored = await createStageAttemptFile(paths.outlineDir, normalizedOutline);
     setCheckpoint(manifest, outlineCheckpoint, "complete", stored.attempt);
     await saveManifest(paths.manifestPath, manifest);
-    outline = result.object;
+    outline = normalizedOutline;
     emitProgress(args.progressReporter, PIPELINE_STEPS.chapter_outline, { done: 1, total: 1, state: "complete", message: "Chapter outline complete.", checkpointId: outlineCheckpoint, checkpointPath: stored.activePath, checkpointUrl: toFileUrl(stored.activePath) });
   }
 
@@ -266,6 +424,8 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
     await saveManifest(paths.manifestPath, manifest);
   }
 
+  await seedStoryBible(paths, outline);
+
   let previousTail = "";
   const chapterTexts: string[] = [];
   for (const chapter of outline.chapters) {
@@ -286,12 +446,111 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
     const system = buildSystemPrompt(config.userInput.systemPromptTemplate);
     const model = resolveModel(config, "chapter", args.modelOverride);
 
+    const blocks = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
+      stage: `chapter_loop:${chapter.chapterNumber}:blocks`,
+      model,
+      system,
+      prompt: buildStoryBlocksPrompt({
+        outline,
+        chapterNumber: chapter.chapterNumber,
+        chapterSummary: chapter.summary,
+        minBlocks: config.userInput.blockPolicy.minBlocksPerChapter,
+        maxBlocks: config.userInput.blockPolicy.maxBlocksPerChapter,
+      }),
+      schema: StoryBlocksResultSchema,
+    }));
+
+    let rollingSummary = RollingSummarySchema.parse({
+      plotState: chapter.summary,
+      characterState: "Characters poised to execute chapter goals.",
+      openLoops: [],
+      styleConstraints: [],
+    });
+    let storyBibleState = await loadStoryBibleState(paths);
+
     while (true) {
       pass += 1;
       if (!current) {
-        const generated = await llmClient.generateText({ stage: `chapter_loop:${chapter.chapterNumber}:generate:${pass}`, model, system, prompt: buildChapterDraftPrompt({ input: config.userInput, outline, chapterNumber: chapter.chapterNumber, chapterSummary: chapter.summary, previousChapterTail: previousTail }) });
-        current = generated.text.trim();
+        const blockDrafts: string[] = [];
+        for (const block of blocks.object.blocks) {
+          const request = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
+            stage: `chapter_loop:${chapter.chapterNumber}:context_request:${pass}:block:${block.blockNumber}`,
+            model,
+            system,
+            prompt: buildContextRequestPrompt({
+              chapterNumber: chapter.chapterNumber,
+              chapterTitle: chapter.title,
+              blockNumber: block.blockNumber,
+              blockGoal: block.goal,
+              blockEvents: block.events,
+              rollingSummary: formatRollingSummary(rollingSummary),
+            }),
+            schema: ContextRequestSchema,
+          }));
+
+          const resolved = await resolveContext(paths, request.object);
+          const resolvedContextText = [
+            `Character context: ${resolved.characterContext.join(" | ") || "None"}`,
+            `Event context: ${resolved.eventContext.join(" | ") || "None"}`,
+            `World context: ${resolved.worldContext.join(" | ") || "None"}`,
+            `Continuity answers: ${resolved.continuityAnswers.join(" | ") || "None"}`,
+            `Carry-forward constraints: ${resolved.carryForwardConstraints.join(" | ") || "None"}`,
+          ].join("\n");
+
+          const draft = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateText({
+            stage: `chapter_loop:${chapter.chapterNumber}:block_draft:${pass}:block:${block.blockNumber}`,
+            model,
+            system,
+            prompt: buildBlockDraftPrompt({
+              outline,
+              chapterNumber: chapter.chapterNumber,
+              chapterTitle: chapter.title,
+              blockNumber: block.blockNumber,
+              blockGoal: block.goal,
+              blockEvents: block.events,
+              blockCharacters: block.characters,
+              targetWordsGuideline: block.targetWordsGuideline,
+              previousChapterTail: previousTail,
+              rollingSummary: formatRollingSummary(rollingSummary),
+              resolvedContext: resolvedContextText,
+            }),
+          }));
+
+          const memory = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
+            stage: `chapter_loop:${chapter.chapterNumber}:memory_update:${pass}:block:${block.blockNumber}`,
+            model: resolveModel(config, "memory", args.modelOverride),
+            system,
+            prompt: buildMemoryUpdatePrompt({
+              chapterNumber: chapter.chapterNumber,
+              blockNumber: block.blockNumber,
+              previousSummary: formatRollingSummary(rollingSummary),
+              blockText: draft.text.trim(),
+            }),
+            schema: RollingSummarySchema,
+          }));
+
+          rollingSummary = memory.object;
+
+          const storyBibleUpdate = await withRetry(config.userInput.retryPolicy, async () => llmClient.generateJson({
+            stage: `chapter_loop:${chapter.chapterNumber}:story_bible_update:${pass}:block:${block.blockNumber}`,
+            model: resolveModel(config, "memory", args.modelOverride),
+            system,
+            prompt: buildStoryBibleUpdatePrompt({
+              chapterNumber: chapter.chapterNumber,
+              blockNumber: block.blockNumber,
+              blockText: draft.text.trim(),
+              currentBible: formatStoryBibleState(storyBibleState),
+            }),
+            schema: StoryBibleStateSchema,
+          }));
+          storyBibleState = storyBibleUpdate.object;
+          await saveStoryBibleState(paths, outline, storyBibleState);
+
+          blockDrafts.push(draft.text.trim());
+        }
+        current = blockDrafts.join("\n\n");
       }
+
       const critique = await llmClient.generateJson({ stage: `chapter_loop:${chapter.chapterNumber}:critic:${pass}`, model, system, prompt: buildCriticPrompt("chapter_loop", current), schema: CRITIC_SCHEMA });
       const delta = Math.max(0, critique.object.score - score);
       score = critique.object.score;
@@ -305,9 +564,10 @@ export async function runPipeline(args: RunPipelineArgs): Promise<string> {
       await saveManifest(paths.manifestPath, manifest);
 
       const minMet = pass >= config.userInput.iterationPolicy.minPassesPerStage;
+      const maxPassesReached = pass >= config.userInput.iterationPolicy.maxPassesPerStage;
       const converged = hasConverged(deltas, config.userInput.iterationPolicy.convergenceWindow, config.userInput.iterationPolicy.deltaThreshold);
       const qualityMet = score >= config.userInput.iterationPolicy.qualityFloor;
-      if (minMet && converged && qualityMet) {
+      if ((minMet && converged && qualityMet) || maxPassesReached) {
         setCheckpoint(manifest, chapterCheckpoint, "complete", pass);
         await saveManifest(paths.manifestPath, manifest);
         chapterTexts.push(markdown);

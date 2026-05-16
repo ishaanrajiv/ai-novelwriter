@@ -14,6 +14,11 @@ export interface ProjectPaths {
   summaryDir: string;
   outlineDir: string;
   chapterDir: string;
+  storyBibleDir: string;
+  storyBibleCharactersPath: string;
+  storyBibleEventsPath: string;
+  storyBibleWorldPath: string;
+  storyBibleStylePath: string;
   globalRevisionDir: string;
   plannerDir: string;
   exportDir: string;
@@ -30,6 +35,11 @@ export function getProjectPaths(artifactsRootAbs: string, projectId: string): Pr
     summaryDir: path.join(projectDir, "stage1-summary"),
     outlineDir: path.join(projectDir, "stage2-outline"),
     chapterDir: path.join(projectDir, "stage3-chapters"),
+    storyBibleDir: path.join(projectDir, "story-bible"),
+    storyBibleCharactersPath: path.join(projectDir, "story-bible", "characters.json"),
+    storyBibleEventsPath: path.join(projectDir, "story-bible", "events.json"),
+    storyBibleWorldPath: path.join(projectDir, "story-bible", "world.json"),
+    storyBibleStylePath: path.join(projectDir, "story-bible", "style.json"),
     globalRevisionDir: path.join(projectDir, "stage4-global-revision"),
     plannerDir: path.join(projectDir, "planner"),
     exportDir: path.join(projectDir, "exports", "epub"),
@@ -45,6 +55,7 @@ export async function initProjectDirs(paths: ProjectPaths): Promise<void> {
     ensureDir(paths.summaryDir),
     ensureDir(paths.outlineDir),
     ensureDir(paths.chapterDir),
+    ensureDir(paths.storyBibleDir),
     ensureDir(paths.globalRevisionDir),
     ensureDir(paths.plannerDir),
     ensureDir(paths.exportDir),
