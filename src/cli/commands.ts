@@ -6,6 +6,7 @@ import {
   createAndRunProject,
   exportProjectEpub,
   getProjectStatus,
+  PipelineRunError,
   listProjects,
   regenerateProject,
   resolveResumeProjectInfo,
@@ -19,6 +20,20 @@ function parseIntOption(value: string | undefined, name: string): number | undef
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) throw new Error(`Invalid ${name}: ${value}`);
   return parsed;
+}
+
+function formatPipelineFailure(error: unknown): string {
+  if (error instanceof PipelineRunError) {
+    const step = error.stepId ?? "unknown";
+    const checkpoint = error.checkpointId ?? "unknown";
+    return [
+      `Pipeline failed at step=${step} checkpoint=${checkpoint}.`,
+      `Retry with: novelwriter resume --project-id ${error.projectId}`,
+      `Failure log: ${error.projectDir}/log/failures.jsonl`,
+      `Error: ${error.message}`,
+    ].join("\n");
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function buildCli(): Command {
@@ -37,16 +52,20 @@ export function buildCli(): Command {
     .description("Start interactive wizard, save config, and run a new novel project")
     .option("--advanced", "Ask advanced wizard arguments")
     .action(async (options: { advanced?: boolean }) => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const modelOverride = program.opts<{ model?: string }>().model;
-      const providerOverride = program.opts<{ provider?: string }>().provider;
-      const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.advanced) });
-      if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
-      await ensureProviderEnv(config.userInput.provider);
-      const progressReporter = createCliProgressReporter();
-      const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
-      console.log(`Project created and generated: ${result.projectId}`);
-      console.log(`Project directory: ${result.projectDir}`);
+      try {
+        const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+        const modelOverride = program.opts<{ model?: string }>().model;
+        const providerOverride = program.opts<{ provider?: string }>().provider;
+        const config = await runInteractiveWizard(artifactsRoot, { askAdvancedArgs: Boolean(options.advanced) });
+        if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
+        await ensureProviderEnv(config.userInput.provider);
+        const progressReporter = createCliProgressReporter();
+        const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
+        console.log(`Project created and generated: ${result.projectId}`);
+        console.log(`Project directory: ${result.projectDir}`);
+      } catch (error) {
+        throw new Error(formatPipelineFailure(error));
+      }
     });
 
   program
@@ -54,17 +73,21 @@ export function buildCli(): Command {
     .description("Run a new project from a YAML config")
     .requiredOption("--config <path>", "Path to YAML config")
     .action(async (options: { config: string }) => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const modelOverride = program.opts<{ model?: string }>().model;
-      const providerOverride = program.opts<{ provider?: string }>().provider;
-      const config = await loadConfigFromYaml(options.config);
-      config.runtime.artifactsRoot = artifactsRoot;
-      if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
-      await ensureProviderEnv(config.userInput.provider);
-      const progressReporter = createCliProgressReporter();
-      const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
-      console.log(`Project created and generated: ${result.projectId}`);
-      console.log(`Project directory: ${result.projectDir}`);
+      try {
+        const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+        const modelOverride = program.opts<{ model?: string }>().model;
+        const providerOverride = program.opts<{ provider?: string }>().provider;
+        const config = await loadConfigFromYaml(options.config);
+        config.runtime.artifactsRoot = artifactsRoot;
+        if (providerOverride === "lmstudio" || providerOverride === "openrouter") config.userInput.provider.type = providerOverride;
+        await ensureProviderEnv(config.userInput.provider);
+        const progressReporter = createCliProgressReporter();
+        const result = await createAndRunProject({ config, progressReporter, ...(modelOverride ? { modelOverride } : {}) });
+        console.log(`Project created and generated: ${result.projectId}`);
+        console.log(`Project directory: ${result.projectDir}`);
+      } catch (error) {
+        throw new Error(formatPipelineFailure(error));
+      }
     });
 
   program
@@ -72,20 +95,24 @@ export function buildCli(): Command {
     .description("Resume an existing project from the first incomplete checkpoint")
     .option("--project-id <id>", "Project ID (defaults to most recent incomplete project)")
     .action(async (options: { projectId?: string }) => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const modelOverride = program.opts<{ model?: string }>().model;
-      const resumeInfo = await resolveResumeProjectInfo({ artifactsRoot, ...(options.projectId ? { projectId: options.projectId } : {}) });
-      const effectiveModel = modelOverride ?? resumeInfo.model;
-      console.log(`Resuming book: "${resumeInfo.bookTitle}" (${resumeInfo.folderName})`);
-      console.log(`Author: ${resumeInfo.author} | Language: ${resumeInfo.language} | Provider: ${resumeInfo.provider} | Model: ${effectiveModel} | Last updated: ${resumeInfo.updatedAt}`);
-      const progressReporter = createCliProgressReporter();
-      const projectId = await resumeProject({
-        artifactsRoot,
-        progressReporter,
-        projectId: resumeInfo.projectId,
-        ...(modelOverride ? { modelOverride } : {}),
-      });
-      console.log(`Resumed project: ${projectId}`);
+      try {
+        const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+        const modelOverride = program.opts<{ model?: string }>().model;
+        const resumeInfo = await resolveResumeProjectInfo({ artifactsRoot, ...(options.projectId ? { projectId: options.projectId } : {}) });
+        const effectiveModel = modelOverride ?? resumeInfo.model;
+        console.log(`Resuming book: "${resumeInfo.bookTitle}" (${resumeInfo.folderName})`);
+        console.log(`Author: ${resumeInfo.author} | Language: ${resumeInfo.language} | Provider: ${resumeInfo.provider} | Model: ${effectiveModel} | Last updated: ${resumeInfo.updatedAt}`);
+        const progressReporter = createCliProgressReporter();
+        const projectId = await resumeProject({
+          artifactsRoot,
+          progressReporter,
+          projectId: resumeInfo.projectId,
+          ...(modelOverride ? { modelOverride } : {}),
+        });
+        console.log(`Resumed project: ${projectId}`);
+      } catch (error) {
+        throw new Error(formatPipelineFailure(error));
+      }
     });
 
   program
@@ -96,27 +123,31 @@ export function buildCli(): Command {
     .option("--chapter <number>", "Chapter number")
     .option("--block <number>", "Block number")
     .action(async (options: { projectId: string; target: string; chapter?: string; block?: string }) => {
-      const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
-      const modelOverride = program.opts<{ model?: string }>().model;
-      const chapter = parseIntOption(options.chapter, "chapter");
-      const block = parseIntOption(options.block, "block");
-      const progressReporter = createCliProgressReporter();
+      try {
+        const artifactsRoot = program.opts<{ artifactsRoot: string }>().artifactsRoot;
+        const modelOverride = program.opts<{ model?: string }>().model;
+        const chapter = parseIntOption(options.chapter, "chapter");
+        const block = parseIntOption(options.block, "block");
+        const progressReporter = createCliProgressReporter();
 
-      if (!["outline", "blocks", "chapter", "block"].includes(options.target)) {
-        throw new Error("target must be one of: outline, blocks, chapter, block");
+        if (!["outline", "blocks", "chapter", "block"].includes(options.target)) {
+          throw new Error("target must be one of: outline, blocks, chapter, block");
+        }
+
+        await regenerateProject({
+          artifactsRoot,
+          projectId: options.projectId,
+          target: options.target as "outline" | "blocks" | "chapter" | "block",
+          progressReporter,
+          ...(chapter ? { chapter } : {}),
+          ...(block ? { block } : {}),
+          ...(modelOverride ? { modelOverride } : {}),
+        });
+
+        console.log(`Regeneration complete for project ${options.projectId} target=${options.target}`);
+      } catch (error) {
+        throw new Error(formatPipelineFailure(error));
       }
-
-      await regenerateProject({
-        artifactsRoot,
-        projectId: options.projectId,
-        target: options.target as "outline" | "blocks" | "chapter" | "block",
-        progressReporter,
-        ...(chapter ? { chapter } : {}),
-        ...(block ? { block } : {}),
-        ...(modelOverride ? { modelOverride } : {}),
-      });
-
-      console.log(`Regeneration complete for project ${options.projectId} target=${options.target}`);
     });
 
   const exportCmd = program.command("export").description("Export outputs");

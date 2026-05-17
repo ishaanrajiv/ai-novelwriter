@@ -15,3 +15,17 @@ export async function appendEvent(projectDir: string, entry: EventLogEntry): Pro
   await ensureDir(path.dirname(logPath));
   await appendFile(logPath, `${JSON.stringify(entry)}\n`, "utf-8");
 }
+
+export interface FailureLogEntry {
+  ts: string;
+  error: string;
+  stepId?: string;
+  checkpointId?: string;
+  details?: Record<string, unknown>;
+}
+
+export async function appendFailure(projectDir: string, entry: FailureLogEntry): Promise<void> {
+  const logPath = path.join(projectDir, "log", "failures.jsonl");
+  await ensureDir(path.dirname(logPath));
+  await appendFile(logPath, `${JSON.stringify(entry)}\n`, "utf-8");
+}

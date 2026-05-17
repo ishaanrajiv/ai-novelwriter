@@ -67,6 +67,7 @@ export async function initProjectDirs(paths: ProjectPaths): Promise<void> {
     ensureDir(paths.usageDir),
     ensureDir(paths.exportDir),
     ensureDir(path.join(paths.projectDir, "logs")),
+    ensureDir(path.join(paths.projectDir, "log")),
   ]);
 }
 

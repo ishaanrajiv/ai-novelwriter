@@ -1,16 +1,19 @@
 import { access } from "node:fs/promises";
 
-import type { LLMClient, LLMUsage } from "../llm/provider.js";
+import type { JsonGenerationOptions, LLMClient, LLMUsage, TextGenerationOptions } from "../llm/provider.js";
 import { readJsonFile, writeJsonAtomic } from "../utils/fs.js";
 
 export interface UsageRequestLogEntry {
   timestamp: string;
+  step: string;
+  status: "succeeded" | "failed";
   provider: string;
   model: string;
   usagePayload: LLMUsage | null;
   inputTokens: number;
   outputTokens: number;
   runDurationMs: number;
+  errorMessage?: string;
 }
 
 export interface UsageSummary {
@@ -117,46 +120,92 @@ export function wrapLLMClientWithUsageLogging(args: {
   summaryPath: string;
 }): LLMClient {
   return {
-    async generateText(options) {
+    async generateText(options: TextGenerationOptions) {
       const startedAt = Date.now();
-      const result = await args.llmClient.generateText(options);
-      const timestamp = new Date().toISOString();
-      const usage = result.usage;
-      await appendUsageLog({
-        requestPath: args.requestPath,
-        summaryPath: args.summaryPath,
-        entry: {
-          timestamp,
-          provider: args.provider,
-          model: options.model,
-          usagePayload: usage ?? null,
-          inputTokens: deriveInputTokens(usage),
-          outputTokens: deriveOutputTokens(usage),
-          runDurationMs: runDurationMs(startedAt),
-        },
-      });
-      return result;
+      try {
+        const result = await args.llmClient.generateText(options);
+        const timestamp = new Date().toISOString();
+        const usage = result.usage;
+        await appendUsageLog({
+          requestPath: args.requestPath,
+          summaryPath: args.summaryPath,
+          entry: {
+            timestamp,
+            step: options.stage,
+            status: "succeeded",
+            provider: args.provider,
+            model: options.model,
+            usagePayload: usage ?? null,
+            inputTokens: deriveInputTokens(usage),
+            outputTokens: deriveOutputTokens(usage),
+            runDurationMs: runDurationMs(startedAt),
+          },
+        });
+        return result;
+      } catch (error) {
+        const timestamp = new Date().toISOString();
+        await appendUsageLog({
+          requestPath: args.requestPath,
+          summaryPath: args.summaryPath,
+          entry: {
+            timestamp,
+            step: options.stage,
+            status: "failed",
+            provider: args.provider,
+            model: options.model,
+            usagePayload: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            runDurationMs: runDurationMs(startedAt),
+            ...(error instanceof Error ? { errorMessage: error.message } : { errorMessage: String(error) }),
+          },
+        });
+        throw error;
+      }
     },
 
-    async generateJson<T>(options) {
+    async generateJson<T>(options: JsonGenerationOptions<T>) {
       const startedAt = Date.now();
-      const result = await args.llmClient.generateJson(options);
-      const timestamp = new Date().toISOString();
-      const usage = result.usage;
-      await appendUsageLog({
-        requestPath: args.requestPath,
-        summaryPath: args.summaryPath,
-        entry: {
-          timestamp,
-          provider: args.provider,
-          model: options.model,
-          usagePayload: usage ?? null,
-          inputTokens: deriveInputTokens(usage),
-          outputTokens: deriveOutputTokens(usage),
-          runDurationMs: runDurationMs(startedAt),
-        },
-      });
-      return result;
+      try {
+        const result = await args.llmClient.generateJson(options);
+        const timestamp = new Date().toISOString();
+        const usage = result.usage;
+        await appendUsageLog({
+          requestPath: args.requestPath,
+          summaryPath: args.summaryPath,
+          entry: {
+            timestamp,
+            step: options.stage,
+            status: "succeeded",
+            provider: args.provider,
+            model: options.model,
+            usagePayload: usage ?? null,
+            inputTokens: deriveInputTokens(usage),
+            outputTokens: deriveOutputTokens(usage),
+            runDurationMs: runDurationMs(startedAt),
+          },
+        });
+        return result;
+      } catch (error) {
+        const timestamp = new Date().toISOString();
+        await appendUsageLog({
+          requestPath: args.requestPath,
+          summaryPath: args.summaryPath,
+          entry: {
+            timestamp,
+            step: options.stage,
+            status: "failed",
+            provider: args.provider,
+            model: options.model,
+            usagePayload: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            runDurationMs: runDurationMs(startedAt),
+            ...(error instanceof Error ? { errorMessage: error.message } : { errorMessage: String(error) }),
+          },
+        });
+        throw error;
+      }
     },
   };
 }
