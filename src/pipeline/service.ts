@@ -157,6 +157,16 @@ function resolveModel(config: AppConfig, stage: "outline" | "chapter" | "memory"
   return m.memoryModel ?? m.chapterModel ?? m.defaultModel;
 }
 
+function resolveIterativeStageModel(config: AppConfig, stageId: StageId, override?: string): string {
+  if (stageId === "premise_expansion" || stageId === "story_summary") {
+    return resolveModel(config, "outline", override);
+  }
+  if (stageId === "global_revision") {
+    return resolveModel(config, "chapter", override);
+  }
+  return resolveModel(config, "memory", override);
+}
+
 const CRITIC_SCHEMA = z.object({ score: z.number().min(0).max(1), notes: z.string().min(1) });
 
 function hasConverged(deltas: number[], windowSize: number, threshold: number): boolean {
@@ -452,8 +462,10 @@ async function runIterativeTextStage(args: {
   let current = "";
   let previousEvaluated = "";
   let score = 0;
+  let initialPrompt = "";
+  let premiseRevisionNotes = "";
   const system = buildSystemPrompt(args.config.userInput.systemPromptTemplate);
-  const model = resolveModel(args.config, "memory", args.modelOverride);
+  const model = resolveIterativeStageModel(args.config, args.stageId, args.modelOverride);
 
   while (true) {
     pass += 1;
@@ -484,8 +496,11 @@ async function runIterativeTextStage(args: {
     setCheckpoint(args.manifest, args.checkpointId, "in_progress", pass);
     await saveManifest(args.paths.manifestPath, args.manifest);
 
+    if (!initialPrompt) {
+      initialPrompt = await args.promptBuilder();
+    }
     if (!current) {
-      const firstPrompt = await args.promptBuilder();
+      const firstPrompt = initialPrompt;
       if (process.env.NOVELWRITER_DEBUG === "1") {
         await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_generate_start", details: { stageId: args.stageId, pass, promptChars: firstPrompt.length } });
       }
@@ -511,6 +526,7 @@ async function runIterativeTextStage(args: {
     score = critique.object.score;
     const delta = Math.max(0, score - prevScore);
     deltas.push(delta);
+    premiseRevisionNotes = critique.object.notes;
 
     const stored = await createStageTextAttemptFile(args.stageDir, current);
     args.manifest.stageRuns[args.stageId] = args.manifest.stageRuns[args.stageId] ?? { stageId: args.stageId, passes: [] };
@@ -533,8 +549,21 @@ async function runIterativeTextStage(args: {
     if (process.env.NOVELWRITER_DEBUG === "1") {
       await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_reviser_start", details: { stageId: args.stageId, pass } });
     }
-    const revised = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:reviser:${pass}`, model, system, prompt: buildReviserPrompt(args.stageId, current, critique.object.notes) }));
-    current = revised.text.trim();
+    if (args.stageId === "premise_expansion") {
+      // Avoid "Chinese whisper" drift: regenerate from source premise + latest critique,
+      // instead of repeatedly revising prior expanded drafts.
+      const regeneratePrompt = [
+        initialPrompt,
+        "Refinement notes from critic (apply concretely while preserving source premise intent):",
+        premiseRevisionNotes,
+        "Rewrite the full brief from scratch with the exact required sections.",
+      ].join("\n\n");
+      const revised = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:reviser:${pass}`, model, system, prompt: regeneratePrompt }));
+      current = revised.text.trim();
+    } else {
+      const revised = await withRetry(args.config.userInput.retryPolicy, async () => args.llmClient.generateText({ stage: `${args.stageId}:reviser:${pass}`, model, system, prompt: buildReviserPrompt(args.stageId, current, critique.object.notes) }));
+      current = revised.text.trim();
+    }
     if (process.env.NOVELWRITER_DEBUG === "1") {
       await appendEvent(args.paths.projectDir, { ts: new Date().toISOString(), level: "info", event: "stage_call_reviser_done", details: { stageId: args.stageId, pass, outputChars: current.length } });
     }
